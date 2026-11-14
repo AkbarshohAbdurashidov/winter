@@ -106,6 +106,9 @@ abstract interface class OverlayPlatform {
 
   /// Asks the native side to resend the desktop geometry.
   Future<void> requestGeometry();
+
+  /// Native window state for diagnostics (empty if unsupported).
+  Future<Map<String, Object?>> diagnostics();
   Future<void> dispose();
 }
 
@@ -187,6 +190,16 @@ class MethodChannelOverlayPlatform implements OverlayPlatform {
 
   @override
   Future<void> requestGeometry() => _invoke('requestGeometry');
+
+  @override
+  Future<Map<String, Object?>> diagnostics() async {
+    try {
+      final r = await _channel.invokeMethod<Map<Object?, Object?>>('diagnostics');
+      return r?.cast<String, Object?>() ?? const {};
+    } on MissingPluginException {
+      return const {};
+    }
+  }
 
   @override
   Future<void> setClickThrough(bool enabled) => _invoke('setClickThrough', enabled);

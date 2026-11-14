@@ -7,10 +7,14 @@ import '../engine/render/world_renderer.dart';
 import '../features/overlay/overlay_controller.dart';
 import '../features/overlay/overlay_view.dart';
 import '../platform/overlay_platform.dart';
+import 'diagnostics.dart';
 
 /// Composition root: creates dependencies and hosts the overlay.
 class WinterApp extends StatefulWidget {
-  const WinterApp({super.key, this.platform});
+  const WinterApp({super.key, this.platform, this.diagnosticsPath});
+
+  /// When set, a JSON status snapshot is written here every few seconds.
+  final String? diagnosticsPath;
 
   /// Injected for tests; defaults to the MethodChannel implementation.
   final OverlayPlatform? platform;
@@ -24,6 +28,7 @@ class _WinterAppState extends State<WinterApp> {
   late final OverlayController _controller = OverlayController(platform: _platform);
   ui.Image? _atlas;
   WorldRenderer? _renderer;
+  DiagnosticsWriter? _diagnostics;
 
   @override
   void initState() {
@@ -38,11 +43,16 @@ class _WinterAppState extends State<WinterApp> {
       return;
     }
     setState(() => _atlas = atlas);
+    final path = widget.diagnosticsPath;
+    if (path != null) {
+      _diagnostics = DiagnosticsWriter(path, _controller, _platform)..start();
+    }
     await _controller.init();
   }
 
   @override
   void dispose() {
+    _diagnostics?.dispose();
     _controller.dispose();
     _platform.dispose();
     _renderer?.dispose();

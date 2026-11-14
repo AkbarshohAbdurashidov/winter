@@ -119,6 +119,16 @@ final class OverlayController: NSObject {
       }
       hitRegions = rects
       result(nil)
+    case "diagnostics":
+      let f = window?.frame ?? .zero
+      result([
+        "visible": window?.isVisible ?? false,
+        "rect": [f.minX, f.minY, f.maxX, f.maxY],
+        "level": window?.level.rawValue ?? 0,
+        "ignoringMouse": window?.ignoresMouseEvents ?? true,
+        "scale": window?.backingScaleFactor ?? 1,
+        "hitRegions": hitRegions.count,
+      ])
     case "requestGeometry":
       lastGeometry = [:]
       geometryQueue.async { [weak self] in self?.pollGeometry() }

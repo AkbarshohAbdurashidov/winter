@@ -302,6 +302,31 @@ void FlutterWindow::HandleMethodCall(
       }
     }
     result->Success();
+  } else if (method == "diagnostics") {
+    HWND hwnd = GetHandle();
+    RECT r{};
+    GetWindowRect(hwnd, &r);
+    const LONG_PTR ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+    HWND child = GetWindow(hwnd, GW_CHILD);
+    RECT cr{};
+    if (child) GetWindowRect(child, &cr);
+    EncodableMap map{
+        {EncodableValue("visible"), EncodableValue(IsWindowVisible(hwnd) == TRUE)},
+        {EncodableValue("rect"), EncodableValue(EncodableList{
+             EncodableValue(static_cast<int>(r.left)), EncodableValue(static_cast<int>(r.top)),
+             EncodableValue(static_cast<int>(r.right)), EncodableValue(static_cast<int>(r.bottom))})},
+        {EncodableValue("childRect"), EncodableValue(EncodableList{
+             EncodableValue(static_cast<int>(cr.left)), EncodableValue(static_cast<int>(cr.top)),
+             EncodableValue(static_cast<int>(cr.right)), EncodableValue(static_cast<int>(cr.bottom))})},
+        {EncodableValue("childVisible"), EncodableValue(child != nullptr && IsWindowVisible(child) == TRUE)},
+        {EncodableValue("exStyle"), EncodableValue(static_cast<int64_t>(ex))},
+        {EncodableValue("topmost"), EncodableValue((ex & WS_EX_TOPMOST) != 0)},
+        {EncodableValue("ignoringMouse"), EncodableValue(ignoring_mouse_)},
+        {EncodableValue("scale"), EncodableValue(monitor_.scale)},
+        {EncodableValue("hitRegions"), EncodableValue(static_cast<int>(hit_regions_.size()))},
+        {EncodableValue("trayAdded"), EncodableValue(tray_added_)},
+    };
+    result->Success(EncodableValue(map));
   } else if (method == "requestGeometry") {
     last_geometry_.clear();
     PollGeometry();

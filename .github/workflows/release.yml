@@ -30,6 +30,10 @@ jobs:
             [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
             [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
             [DllImport("user32.dll")] public static extern int GetSystemMetrics(int i);
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr FindWindow(string c, string t);
+            [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+            [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+            [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
             [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr d, int x, int y, int w, int h, IntPtr s, int sx, int sy, int op);
             public static void Blit(IntPtr dst, int w, int h) {
               IntPtr src = GetDC(IntPtr.Zero);
@@ -45,15 +49,29 @@ jobs:
             $hdc = $g.GetHdc(); [Grab]::Blit($hdc, $w, $h); $g.ReleaseHdc($hdc); $g.Dispose()
             $bmp.Save((Join-Path (Get-Location) "smoke\$name.png")); $bmp.Dispose()
           }
+          # PW_RENDERFULLCONTENT (2) also captures DirectComposition content.
+          function Window($name, $hwnd) {
+            $r = New-Object Grab+RECT; [Grab]::GetWindowRect($hwnd, [ref]$r) | Out-Null
+            $w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
+            $bmp = New-Object System.Drawing.Bitmap $w, $h
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $hdc = $g.GetHdc(); [Grab]::PrintWindow($hwnd, $hdc, 2) | Out-Null; $g.ReleaseHdc($hdc); $g.Dispose()
+            $bmp.Save((Join-Path (Get-Location) "smoke\$name.png")); $bmp.Dispose()
+          }
           Shot "before"
-          $p = Start-Process build\windows\x64\runner\Release\Winter.exe -PassThru
+          $diag = Join-Path (Get-Location) "smoke\diagnostics.json"
+          $p = Start-Process build\windows\x64\runner\Release\Winter.exe -ArgumentList "--diagnostics","`"$diag`"" -PassThru
           Start-Sleep 25
           Shot "running"
           Start-Sleep 30
           Shot "running-55s"
+          $hwnd = [Grab]::FindWindow($null, "Winter")
+          "Overlay HWND: $hwnd"
+          if ($hwnd -ne [IntPtr]::Zero) { Window "overlay-printwindow" $hwnd }
+          Get-Content $diag
           if ($p.HasExited) { throw "Winter exited early with code $($p.ExitCode)" }
           "Working set MB: {0:N1}" -f ($p.WorkingSet64 / 1MB)
-          "CPU seconds after 25 s: {0:N2}" -f $p.TotalProcessorTime.TotalSeconds
+          "CPU seconds after 55 s: {0:N2}" -f $p.TotalProcessorTime.TotalSeconds
           Stop-Process $p
       - uses: actions/upload-artifact@v4
         if: always()

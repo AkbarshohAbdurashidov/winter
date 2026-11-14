@@ -1,8 +1,9 @@
 import 'package:flutter/widgets.dart';
 
+import 'app/diagnostics.dart';
 import 'app/winter_app.dart';
 
-void main() {
+void main(List<String> args) {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const WinterApp());
+  runApp(WinterApp(diagnosticsPath: DiagnosticsWriter.pathFromArgs(args)));
 }
