@@ -12,8 +12,9 @@ export const config = {
   /// The `app` Cloud Function, e.g. https://europe-west1-<project>.cloudfunctions.net/app
   apiUrl: ((import.meta.env.VITE_API_URL as string) || "").replace(/\/+$/, ""),
   useEmulators: import.meta.env.VITE_USE_EMULATORS === "true",
-  downloadMac: (import.meta.env.VITE_DOWNLOAD_MAC as string) || "#",
-  downloadWindows: (import.meta.env.VITE_DOWNLOAD_WINDOWS as string) || "#",
+  // Direct downloads of the latest release's files (no GitHub page).
+  downloadMac: (import.meta.env.VITE_DOWNLOAD_MAC as string) || "https://github.com/AkbarshohAbdurashidov/winter/releases/latest/download/Winter-macOS.dmg",
+  downloadWindows: (import.meta.env.VITE_DOWNLOAD_WINDOWS as string) || "https://github.com/AkbarshohAbdurashidov/winter/releases/latest/download/Winter-Windows-Setup.exe",
 };
 
 export const firebaseApp = initializeApp(config.firebase);
