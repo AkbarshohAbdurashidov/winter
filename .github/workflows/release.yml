@@ -18,6 +18,31 @@ jobs:
       - run: flutter pub get
       - run: flutter test
       - run: flutter build windows --release
+      - name: Smoke test (launch, stay alive, screenshot)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force smoke | Out-Null
+          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
+          function Shot($name) {
+            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            $bmp.Save("smoke\$name.png")
+          }
+          Shot "before"
+          $p = Start-Process build\windows\x64\runner\Release\Winter.exe -PassThru
+          Start-Sleep 25
+          Shot "running"
+          if ($p.HasExited) { throw "Winter exited early with code $($p.ExitCode)" }
+          "Working set MB: {0:N1}" -f ($p.WorkingSet64 / 1MB)
+          "CPU seconds after 25 s: {0:N2}" -f $p.TotalProcessorTime.TotalSeconds
+          Stop-Process $p
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: winter-windows-smoke
+          path: smoke/*
       - name: Build installer
         shell: pwsh
         run: |
