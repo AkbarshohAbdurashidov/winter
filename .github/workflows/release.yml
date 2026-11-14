@@ -34,6 +34,11 @@ jobs:
             [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
             [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
             [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+            [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+            [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+            [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+            [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr h, uint flags);
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
             [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr d, int x, int y, int w, int h, IntPtr s, int sx, int sy, int op);
             public static void Blit(IntPtr dst, int w, int h) {
               IntPtr src = GetDC(IntPtr.Zero);
@@ -65,10 +70,21 @@ jobs:
           Shot "running"
           Start-Sleep 30
           Shot "running-55s"
-          $hwnd = [Grab]::FindWindow($null, "Winter")
+          $hwnd = [Grab]::FindWindow([NullString]::Value, "Winter")
           "Overlay HWND: $hwnd"
           if ($hwnd -ne [IntPtr]::Zero) { Window "overlay-printwindow" $hwnd }
           Get-Content $diag
+          # Click-through check: with the cursor away from any snow, the window
+          # under the screen centre must not be ours.
+          [Grab]::SetCursorPos(3, 300) | Out-Null
+          Start-Sleep 1
+          $pt = New-Object Grab+POINT; $pt.X = 512; $pt.Y = 384
+          $under = [Grab]::WindowFromPoint($pt)
+          $cls = New-Object System.Text.StringBuilder 256
+          [Grab]::GetClassName($under, $cls, 256) | Out-Null
+          $root = [Grab]::GetAncestor($under, 2)
+          "Window under centre: $under class=$cls root=$root overlay=$hwnd"
+          if ($hwnd -ne [IntPtr]::Zero -and $root -eq $hwnd) { throw "Overlay is not click-through" }
           if ($p.HasExited) { throw "Winter exited early with code $($p.ExitCode)" }
           "Working set MB: {0:N1}" -f ($p.WorkingSet64 / 1MB)
           "CPU seconds after 55 s: {0:N2}" -f $p.TotalProcessorTime.TotalSeconds

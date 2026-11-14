@@ -71,6 +71,8 @@ class FlutterWindow : public Win32Window {
   bool click_through_enabled_ = true;
   bool ignoring_mouse_ = false;
   bool ignore_state_known_ = false;
+  bool last_requested_ignore_ = false;
+  int style_reapplied_ = 0;  // times the click-through style had been lost
 
   // Geometry change detection.
   std::vector<double> last_geometry_;

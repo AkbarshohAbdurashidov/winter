@@ -180,19 +180,21 @@ void FlutterWindow::ApplyLevel(const std::string& level) {
   }
 }
 
-// Same technique as window_manager's setIgnoreMouseEvents.
+// Same technique as window_manager's setIgnoreMouseEvents. The actual style
+// is checked every time (not a cached flag): something can clear
+// WS_EX_TRANSPARENT behind our back, and a non-transparent full-screen
+// overlay would swallow every click on the desktop.
 void FlutterWindow::SetIgnoreMouse(bool ignore) {
-  if (ignore_state_known_ && ignore == ignoring_mouse_) return;
-  ignore_state_known_ = true;
-  ignoring_mouse_ = ignore;
   HWND hwnd = GetHandle();
-  LONG_PTR ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
-  if (ignore) {
-    ex |= (WS_EX_TRANSPARENT | WS_EX_LAYERED);
-  } else {
-    ex &= ~(WS_EX_TRANSPARENT | WS_EX_LAYERED);
-  }
-  SetWindowLongPtr(hwnd, GWL_EXSTYLE, ex);
+  const LONG_PTR ex = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+  constexpr LONG_PTR kBits = WS_EX_TRANSPARENT | WS_EX_LAYERED;
+  const bool current = (ex & kBits) == kBits;
+  ignoring_mouse_ = ignore;
+  if (ignore == current && (ignore || (ex & kBits) == 0)) return;
+  if (ignore_state_known_ && ignore == last_requested_ignore_) style_reapplied_++;
+  ignore_state_known_ = true;
+  last_requested_ignore_ = ignore;
+  SetWindowLongPtr(hwnd, GWL_EXSTYLE, ignore ? (ex | kBits) : (ex & ~kBits));
 }
 
 void FlutterWindow::UpdateInteractive(bool force) {
@@ -325,6 +327,7 @@ void FlutterWindow::HandleMethodCall(
         {EncodableValue("scale"), EncodableValue(monitor_.scale)},
         {EncodableValue("hitRegions"), EncodableValue(static_cast<int>(hit_regions_.size()))},
         {EncodableValue("trayAdded"), EncodableValue(tray_added_)},
+        {EncodableValue("styleReapplied"), EncodableValue(style_reapplied_)},
     };
     result->Success(EncodableValue(map));
   } else if (method == "requestGeometry") {
