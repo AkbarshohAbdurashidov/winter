@@ -27,13 +27,17 @@ jobs:
             $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
             $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
             $g = [System.Drawing.Graphics]::FromImage($bmp)
-            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+            # CaptureBlt is required to include layered (click-through) windows.
+            $op = [System.Drawing.CopyPixelOperation]::SourceCopy -bor [System.Drawing.CopyPixelOperation]::CaptureBlt
+            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size, $op)
             $bmp.Save("smoke\$name.png")
           }
           Shot "before"
           $p = Start-Process build\windows\x64\runner\Release\Winter.exe -PassThru
           Start-Sleep 25
           Shot "running"
+          Start-Sleep 30
+          Shot "running-55s"
           if ($p.HasExited) { throw "Winter exited early with code $($p.ExitCode)" }
           "Working set MB: {0:N1}" -f ($p.WorkingSet64 / 1MB)
           "CPU seconds after 25 s: {0:N2}" -f $p.TotalProcessorTime.TotalSeconds
