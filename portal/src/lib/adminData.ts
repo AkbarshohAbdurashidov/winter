@@ -12,6 +12,9 @@ const me = () => (auth.currentUser?.email ?? "").toLowerCase();
 export async function isAdmin(): Promise<boolean> {
   if (!me()) return false;
   try {
+    if ((await getDoc(doc(db, "admins", me()))).exists()) return true;
+    // First sign-in of an ADMIN_EMAILS address: /hello creates the admin doc.
+    await callApp("/hello");
     return (await getDoc(doc(db, "admins", me()))).exists();
   } catch {
     return false;

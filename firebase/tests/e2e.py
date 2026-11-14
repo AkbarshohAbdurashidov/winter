@@ -353,6 +353,12 @@ if __name__ == "__main__":
     c, r = app("/status", {"token": token})
     check("expired grant -> not pro", not r["pro"], r)
 
+    print("bootstrap admin (ADMIN_EMAILS)")
+    bjwt, _ = google_sign_in("boot-admin@example.com")
+    app("/hello", {}, bjwt)
+    c, r = app("/admin/stats", {}, bjwt)
+    check("ADMIN_EMAILS address becomes admin on first sign-in", c == 200, r)
+
     print("admin read models + Telegram status")
     c, r = app("/admin/users", {}, ajwt)
     u = [x for x in r["users"] if x["email"] == user_email][0]

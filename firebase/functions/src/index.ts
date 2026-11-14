@@ -36,6 +36,9 @@ import {
 setGlobalOptions({ region: "europe-west1", maxInstances: 10 });
 
 const PORTAL_URL = defineString("PORTAL_URL", { default: "http://localhost:5173" });
+/// Comma-separated emails that become admins on their first sign-in, so the
+/// first admin doesn't have to be created by hand in the console.
+const ADMIN_EMAILS = defineString("ADMIN_EMAILS", { default: "" });
 
 const LINK_TTL_MS = 15 * 60 * 1000;
 type Body = Record<string, unknown>;
@@ -229,6 +232,12 @@ const routes: Record<string, (b: Body, req: Request) => Promise<unknown>> = {
       return true;
     });
     if (created) await announceNewUser(user.email!, user.name ?? null);
+    const email = user.email!.toLowerCase();
+    const bootstrap = ADMIN_EMAILS.value().split(",").map((e) => e.trim().toLowerCase()).filter(Boolean);
+    if (bootstrap.includes(email)) {
+      const admin = db.collection("admins").doc(email);
+      if (!(await admin.get()).exists) await admin.set({ addedAt: Timestamp.now(), addedBy: "ADMIN_EMAILS" });
+    }
     return { ok: true, created };
   },
 

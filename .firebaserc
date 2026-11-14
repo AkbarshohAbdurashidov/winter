@@ -1,5 +1,6 @@
 {
   "projects": {
-    "default": "demo-winter"
+    "default": "demo-winter",
+    "prod": "winter-snow-app"
   }
 }

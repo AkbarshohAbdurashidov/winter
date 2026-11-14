@@ -3,3 +3,4 @@ lib/
 .secret.local
 .env.local
 *.log
+.env.winter-snow-app
