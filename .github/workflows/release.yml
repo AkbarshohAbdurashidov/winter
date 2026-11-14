@@ -22,16 +22,29 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force smoke | Out-Null
-          Add-Type -AssemblyName System.Windows.Forms,System.Drawing
-          function Shot($name) {
-            $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-            $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-            $g = [System.Drawing.Graphics]::FromImage($bmp)
-            # CaptureBlt is required to include layered (click-through) windows.
-            $op = [System.Drawing.CopyPixelOperation]::SourceCopy -bor [System.Drawing.CopyPixelOperation]::CaptureBlt
-            $g.CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size, $op)
-            $bmp.Save("smoke\$name.png")
+          Add-Type -AssemblyName System.Drawing
+          # BitBlt with CAPTUREBLT so layered (click-through) windows are included.
+          Add-Type -ReferencedAssemblies System.Drawing.Common,System.Drawing.Primitives -TypeDefinition @"
+          using System; using System.Drawing; using System.Runtime.InteropServices;
+          public static class Grab {
+            [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
+            [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
+            [DllImport("user32.dll")] static extern int GetSystemMetrics(int i);
+            [DllImport("gdi32.dll")] static extern bool BitBlt(IntPtr d, int x, int y, int w, int h, IntPtr s, int sx, int sy, int op);
+            public static void Save(string path) {
+              int w = GetSystemMetrics(0), h = GetSystemMetrics(1);
+              using (var bmp = new Bitmap(w, h)) {
+                using (var g = Graphics.FromImage(bmp)) {
+                  IntPtr dst = g.GetHdc(); IntPtr src = GetDC(IntPtr.Zero);
+                  BitBlt(dst, 0, 0, w, h, src, 0, 0, 0x00CC0020 | 0x40000000);
+                  ReleaseDC(IntPtr.Zero, src); g.ReleaseHdc(dst);
+                }
+                bmp.Save(path);
+              }
+            }
           }
+          "@
+          function Shot($name) { [Grab]::Save((Join-Path (Get-Location) "smoke\$name.png")) }
           Shot "before"
           $p = Start-Process build\windows\x64\runner\Release\Winter.exe -PassThru
           Start-Sleep 25
