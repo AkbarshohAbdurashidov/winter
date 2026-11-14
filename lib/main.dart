@@ -11,5 +11,5 @@ void main(List<String> args) {
   final screen = (i >= 0 && i + 1 < args.length) ? int.tryParse(args[i + 1]) ?? 0 : 0;
   var diagnostics = DiagnosticsWriter.pathFromArgs(args);
   if (diagnostics != null && screen != 0) diagnostics = '$diagnostics.screen$screen';
-  runApp(WinterApp(diagnosticsPath: diagnostics));
+  runApp(WinterApp(diagnosticsPath: diagnostics, screenId: screen));
 }

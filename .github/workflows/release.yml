@@ -17,7 +17,9 @@ jobs:
           cache: true
       - run: flutter pub get
       - run: flutter test
-      - run: flutter build windows --release
+      # Repository variables WINTER_API_URL / WINTER_API_KEY enable accounts
+      # and Pro (empty = free build). Both are public values.
+      - run: flutter build windows --release --dart-define=WINTER_API_URL=${{ vars.WINTER_API_URL }} --dart-define=WINTER_API_KEY=${{ vars.WINTER_API_KEY }}
       - name: Smoke test (launch, stay alive, screenshot)
         shell: pwsh
         run: |
@@ -106,6 +108,28 @@ jobs:
           name: winter-windows
           path: dist/*
 
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: 2.120.0
+      - name: End-to-end test (local Supabase)
+        working-directory: backend
+        run: |
+          supabase start -x vector,logflare,imgproxy,realtime,storage-api,supavisor,studio
+          printf 'PORTAL_URL=http://localhost:5173\nREVENUECAT_WEBHOOK_AUTH=local-webhook-secret\n' > /tmp/fn.env
+          supabase functions serve --env-file /tmp/fn.env > /tmp/functions.log 2>&1 &
+          for i in $(seq 1 60); do curl -s -o /dev/null -X POST http://127.0.0.1:54321/functions/v1/app/status && break; sleep 2; done
+          python3 tests/e2e.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Build web portal
+        working-directory: portal
+        run: npm ci && npm run build
+
   macos:
     runs-on: macos-latest
     steps:
@@ -118,6 +142,9 @@ jobs:
       - run: flutter pub get
       - run: flutter test
       - run: scripts/build_macos_dmg.sh
+        env:
+          WINTER_API_URL: ${{ vars.WINTER_API_URL }}
+          WINTER_API_KEY: ${{ vars.WINTER_API_KEY }}
       - uses: actions/upload-artifact@v4
         with:
           name: winter-macos

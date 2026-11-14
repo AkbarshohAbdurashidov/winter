@@ -3,6 +3,7 @@ import 'dart:ui' show Offset, Rect, Size;
 
 import 'package:flutter/foundation.dart';
 
+import '../../account/account_service.dart';
 import '../../engine/loop/frame_scheduler.dart';
 import '../../engine/quality/quality.dart';
 import '../../engine/snow/snow_system.dart';
@@ -18,6 +19,7 @@ import '../../platform/overlay_platform.dart';
 class OverlayController extends ChangeNotifier {
   OverlayController({
     required this._platform,
+    this.account,
     SnowSystem? system,
     WinterWorld? world,
     FrameStats? stats,
@@ -32,6 +34,10 @@ class OverlayController extends ChangeNotifier {
   }
 
   final OverlayPlatform _platform;
+
+  /// Pro status and sign-in. Null = no account features (tests, builds
+  /// without a backend): every option is available.
+  final AccountService? account;
   final SnowSystem system;
   final WinterWorld world;
   final FrameStats stats;
@@ -60,8 +66,17 @@ class OverlayController extends ChangeNotifier {
   QualityPreset get quality => _quality;
   bool get isAnimating => scheduler.isRunning;
 
+  /// Options that need Winter Pro (when a backend is configured).
+  static const proIntensities = {SnowIntensity.heavy, SnowIntensity.blizzard};
+  static const proQualities = {QualityPreset.high, QualityPreset.ultra};
+
+  bool get _proRequired => account?.enabled ?? false;
+  bool get hasPro => !_proRequired || account!.isPro;
+
   Future<void> init() async {
     _sub = _platform.events.listen(_onEvent);
+    account?.addListener(_onAccountChanged);
+    _enforcePro();
     system
       ..setWeather(WeatherParams.forIntensity(_intensity))
       ..setQuality(QualityProfile.forPreset(_quality));
@@ -159,8 +174,51 @@ class OverlayController extends ChangeNotifier {
     }
   }
 
+  void _onAccountChanged() {
+    _enforcePro();
+    _changed();
+  }
+
+  /// Without Pro, Pro-only settings fall back to the best free ones.
+  void _enforcePro() {
+    if (hasPro) return;
+    if (proIntensities.contains(_intensity)) {
+      _intensity = SnowIntensity.normal;
+      system.setWeather(WeatherParams.forIntensity(_intensity));
+    }
+    if (proQualities.contains(_quality)) {
+      _quality = QualityPreset.medium;
+      final profile = QualityProfile.forPreset(_quality);
+      system.setQuality(profile);
+      scheduler.targetFps = profile.targetFps;
+    }
+  }
+
   void _onMenuAction(String action) {
     final parts = action.split(':');
+    // Menu actions reach every screen's engine; only the account owner
+    // (first screen) talks to the backend, the others re-read its state.
+    if (parts.first == 'account') {
+      final a = account;
+      if (a == null) return;
+      if (!a.owner) {
+        Future<void>.delayed(const Duration(seconds: 2), a.reloadFromStore);
+        return;
+      }
+      switch (parts.elementAtOrNull(1)) {
+        case 'signIn':
+          unawaited(a.signIn());
+        case 'signOut':
+          unawaited(a.signOut());
+        case 'upgrade':
+          unawaited(a.upgrade());
+        case 'manage':
+          unawaited(a.openAccount());
+        case 'refresh':
+          unawaited(a.refresh());
+      }
+      return;
+    }
     switch (parts) {
       case ['togglePause']:
         setPaused(!_userPaused);
@@ -171,10 +229,22 @@ class OverlayController extends ChangeNotifier {
       case ['level', final name]:
         setLevel(OverlayLevel.values.byName(name));
       case ['intensity', final name]:
-        setIntensity(SnowIntensity.values.byName(name));
+        final value = SnowIntensity.values.byName(name);
+        if (!hasPro && proIntensities.contains(value)) return _offerPro();
+        setIntensity(value);
       case ['quality', final name]:
-        setQuality(QualityPreset.values.byName(name));
+        final value = QualityPreset.values.byName(name);
+        if (!hasPro && proQualities.contains(value)) return _offerPro();
+        setQuality(value);
     }
+  }
+
+  /// A Pro-only option was chosen without Pro: open the paywall (once,
+  /// from the first screen) and keep the current setting.
+  void _offerPro() {
+    final a = account;
+    if (a != null && a.owner) unawaited(a.upgrade());
+    _changed(); // re-sync check marks
   }
 
   void _updateRunning() {
@@ -198,10 +268,19 @@ class OverlayController extends ChangeNotifier {
         intensity: _intensity.name,
         quality: _quality.name,
         showStats: _showStats,
+        account: AccountMenuState(
+          enabled: account?.enabled ?? false,
+          signedIn: account?.signedIn ?? false,
+          linking: account?.linking ?? false,
+          pro: hasPro,
+          email: account?.status.email ?? '',
+          planLabel: account?.status.label ?? '',
+        ),
       ));
 
   @override
   void dispose() {
+    account?.removeListener(_onAccountChanged);
     _sub?.cancel();
     scheduler.dispose();
     stats.dispose();

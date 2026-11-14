@@ -65,6 +65,9 @@ class FlutterWindow : public Win32Window {
   void PublishVisibility(const char* reason);
   std::string StateString(const char* key) const;
   bool StateBool(const char* key) const;
+  const flutter::EncodableMap* AccountState() const;
+  bool AccountBool(const char* key) const;
+  std::wstring AccountText(const char* key) const;
 
   flutter::DartProject project_;
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;

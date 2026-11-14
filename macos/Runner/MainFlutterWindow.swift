@@ -474,15 +474,31 @@ final class OverlayManager: NSObject {
 
   private func rebuildMenu() {
     let menu = NSMenu()
+    let account = menuState["account"] as? [String: Any] ?? [:]
+    let accountEnabled = account["enabled"] as? Bool ?? false
+    let pro = !accountEnabled || (account["pro"] as? Bool ?? false)
+
     let paused = menuState["paused"] as? Bool ?? false
     menu.addItem(item(paused ? "Resume Snow" : "Pause Snow", "togglePause", key: "p"))
     menu.addItem(.separator())
 
+    if accountEnabled {
+      if account["pro"] as? Bool ?? false {
+        let plan = account["planLabel"] as? String ?? ""
+        menu.addItem(disabled("❄︎ Winter Pro" + (plan.isEmpty ? "" : " · \(plan)")))
+      } else {
+        menu.addItem(item("Get Winter Pro…", "account:upgrade"))
+      }
+      menu.addItem(.separator())
+    }
+
+    // Pro-only options stay visible; choosing one without Pro opens the paywall.
+    let proTag = pro ? "" : "  (Pro)"
     menu.addItem(submenu("Snowfall", key: "intensity", current: menuState["intensity"] as? String, options: [
-      ("Light", "light"), ("Normal", "normal"), ("Heavy", "heavy"), ("Blizzard", "blizzard"),
+      ("Light", "light"), ("Normal", "normal"), ("Heavy" + proTag, "heavy"), ("Blizzard" + proTag, "blizzard"),
     ]))
     menu.addItem(submenu("Quality", key: "quality", current: menuState["quality"] as? String, options: [
-      ("Ultra Low", "ultraLow"), ("Low", "low"), ("Medium", "medium"), ("High", "high"), ("Ultra", "ultra"),
+      ("Ultra Low", "ultraLow"), ("Low", "low"), ("Medium", "medium"), ("High" + proTag, "high"), ("Ultra" + proTag, "ultra"),
     ]))
     menu.addItem(submenu("Position", key: "level", current: menuState["level"] as? String, options: [
       ("Above Windows", "aboveWindows"), ("On Desktop (behind windows)", "desktop"),
@@ -493,8 +509,28 @@ final class OverlayManager: NSObject {
     stats.state = (menuState["showStats"] as? Bool ?? false) ? .on : .off
     menu.addItem(stats)
     menu.addItem(.separator())
+
+    if accountEnabled {
+      if account["linking"] as? Bool ?? false {
+        menu.addItem(disabled("Waiting for sign-in in your browser…"))
+      } else if account["signedIn"] as? Bool ?? false {
+        menu.addItem(disabled("Signed in as \(account["email"] as? String ?? "")"))
+        menu.addItem(item("Manage Account…", "account:manage"))
+        menu.addItem(item("Refresh Pro Status", "account:refresh"))
+        menu.addItem(item("Sign Out", "account:signOut"))
+      } else {
+        menu.addItem(item("Sign In…", "account:signIn"))
+      }
+      menu.addItem(.separator())
+    }
     menu.addItem(NSMenuItem(title: "Quit Winter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
     statusItem?.menu = menu
+  }
+
+  private func disabled(_ title: String) -> NSMenuItem {
+    let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+    item.isEnabled = false
+    return item
   }
 
   private func item(_ title: String, _ action: String, key: String = "") -> NSMenuItem {

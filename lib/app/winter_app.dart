@@ -2,6 +2,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/widgets.dart';
 
+import '../account/account_service.dart';
 import '../engine/render/flake_atlas.dart';
 import '../engine/render/world_renderer.dart';
 import '../features/overlay/overlay_controller.dart';
@@ -11,7 +12,14 @@ import 'diagnostics.dart';
 
 /// Composition root: creates dependencies and hosts the overlay.
 class WinterApp extends StatefulWidget {
-  const WinterApp({super.key, this.platform, this.diagnosticsPath});
+  const WinterApp({super.key, this.platform, this.diagnosticsPath, this.screenId = 0, this.account});
+
+  /// Which display this engine draws (0 = first). Only screen 0 talks to the
+  /// account backend; the others follow its saved state.
+  final int screenId;
+
+  /// Injected for tests; defaults to the real account service.
+  final AccountService? account;
 
   /// When set, a JSON status snapshot is written here every few seconds.
   final String? diagnosticsPath;
@@ -25,7 +33,8 @@ class WinterApp extends StatefulWidget {
 
 class _WinterAppState extends State<WinterApp> {
   late final OverlayPlatform _platform = widget.platform ?? MethodChannelOverlayPlatform();
-  late final OverlayController _controller = OverlayController(platform: _platform);
+  late final AccountService _account = widget.account ?? AccountService(owner: widget.screenId == 0);
+  late final OverlayController _controller = OverlayController(platform: _platform, account: _account);
   ui.Image? _atlas;
   WorldRenderer? _renderer;
   DiagnosticsWriter? _diagnostics;
@@ -48,12 +57,14 @@ class _WinterAppState extends State<WinterApp> {
       _diagnostics = DiagnosticsWriter(path, _controller, _platform)..start();
     }
     await _controller.init();
+    await _account.start();
   }
 
   @override
   void dispose() {
     _diagnostics?.dispose();
     _controller.dispose();
+    if (widget.account == null) _account.dispose();
     _platform.dispose();
     _renderer?.dispose();
     _atlas?.dispose();

@@ -8,7 +8,12 @@ VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: *//; s/+.*//')
 APP=build/macos/Build/Products/Release/Winter.app
 DMG=dist/Winter-$VERSION-macOS.dmg
 
-flutter build macos --release
+# Account/Pro features need the backend URL (see docs/MONETIZATION.md);
+# without it the app builds as the plain free version.
+DEFINES=()
+[ -n "${WINTER_API_URL:-}" ] && DEFINES+=(--dart-define=WINTER_API_URL="$WINTER_API_URL")
+[ -n "${WINTER_API_KEY:-}" ] && DEFINES+=(--dart-define=WINTER_API_KEY="$WINTER_API_KEY")
+flutter build macos --release "${DEFINES[@]+"${DEFINES[@]}"}"
 # Re-sign ad hoc so the bundle is consistently signed (no Developer ID available).
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"

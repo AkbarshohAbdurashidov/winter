@@ -73,6 +73,7 @@ class OverlayMenuState {
     required this.intensity,
     required this.quality,
     required this.showStats,
+    this.account = const AccountMenuState(),
   });
 
   final bool paused;
@@ -80,6 +81,7 @@ class OverlayMenuState {
   final String intensity;
   final String quality;
   final bool showStats;
+  final AccountMenuState account;
 
   Map<String, Object> toMap() => {
         'paused': paused,
@@ -87,6 +89,37 @@ class OverlayMenuState {
         'intensity': intensity,
         'quality': quality,
         'showStats': showStats,
+        'account': account.toMap(),
+      };
+}
+
+/// Account section of the native menu. Native code shows it only when
+/// [enabled] (a backend is configured), and marks Pro-only options while
+/// [pro] is false.
+class AccountMenuState {
+  const AccountMenuState({
+    this.enabled = false,
+    this.signedIn = false,
+    this.linking = false,
+    this.pro = false,
+    this.email = '',
+    this.planLabel = '',
+  });
+
+  final bool enabled;
+  final bool signedIn;
+  final bool linking;
+  final bool pro;
+  final String email;
+  final String planLabel;
+
+  Map<String, Object> toMap() => {
+        'enabled': enabled,
+        'signedIn': signedIn,
+        'linking': linking,
+        'pro': pro,
+        'email': email,
+        'planLabel': planLabel,
       };
 }
 

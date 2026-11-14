@@ -508,6 +508,34 @@ std::string FlutterWindow::StateString(const char* key) const {
   return s ? *s : "";
 }
 
+const EncodableMap* FlutterWindow::AccountState() const {
+  auto it = menu_state_.find(EncodableValue("account"));
+  if (it == menu_state_.end()) return nullptr;
+  return std::get_if<EncodableMap>(&it->second);
+}
+
+bool FlutterWindow::AccountBool(const char* key) const {
+  const EncodableMap* account = AccountState();
+  if (!account) return false;
+  auto it = account->find(EncodableValue(key));
+  if (it == account->end()) return false;
+  const auto* b = std::get_if<bool>(&it->second);
+  return b && *b;
+}
+
+std::wstring FlutterWindow::AccountText(const char* key) const {
+  const EncodableMap* account = AccountState();
+  if (!account) return L"";
+  auto it = account->find(EncodableValue(key));
+  if (it == account->end()) return L"";
+  const auto* s = std::get_if<std::string>(&it->second);
+  if (!s || s->empty()) return L"";
+  const int n = MultiByteToWideChar(CP_UTF8, 0, s->data(), static_cast<int>(s->size()), nullptr, 0);
+  std::wstring w(n, L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, s->data(), static_cast<int>(s->size()), w.data(), n);
+  return w;
+}
+
 bool FlutterWindow::StateBool(const char* key) const {
   auto it = menu_state_.find(EncodableValue(key));
   if (it == menu_state_.end()) return false;
@@ -554,27 +582,58 @@ void FlutterWindow::ShowTrayMenu() {
     AppendMenu(root, MF_POPUP, reinterpret_cast<UINT_PTR>(m), title);
   };
 
+  const bool account_enabled = AccountBool("enabled");
+  const bool pro = !account_enabled || AccountBool("pro");
+  // Pro-only options stay visible; choosing one without Pro opens the paywall.
+  const std::wstring pro_tag = pro ? L"" : L"  (Pro)";
+  const std::wstring heavy = L"Heavy" + pro_tag, blizzard = L"Blizzard" + pro_tag;
+  const std::wstring high = L"High" + pro_tag, ultra = L"Ultra" + pro_tag;
+
   HMENU menu = CreatePopupMenu();
   add(menu, StateBool("paused") ? L"Resume Snow" : L"Pause Snow",
       "togglePause", false);
   AppendMenu(menu, MF_SEPARATOR, 0, nullptr);
+  if (account_enabled) {
+    if (AccountBool("pro")) {
+      const std::wstring plan = AccountText("planLabel");
+      const std::wstring label = L"Winter Pro" + (plan.empty() ? L"" : L" \u00B7 " + plan);
+      AppendMenu(menu, MF_STRING | MF_GRAYED, 0, label.c_str());
+    } else {
+      add(menu, L"Get Winter Pro\u2026", "account:upgrade", false);
+    }
+    AppendMenu(menu, MF_SEPARATOR, 0, nullptr);
+  }
   sub(menu, L"Snowfall", "intensity",
       {{L"Light", "light"},
        {L"Normal", "normal"},
-       {L"Heavy", "heavy"},
-       {L"Blizzard", "blizzard"}});
+       {heavy.c_str(), "heavy"},
+       {blizzard.c_str(), "blizzard"}});
   sub(menu, L"Quality", "quality",
       {{L"Ultra Low", "ultraLow"},
        {L"Low", "low"},
        {L"Medium", "medium"},
-       {L"High", "high"},
-       {L"Ultra", "ultra"}});
+       {high.c_str(), "high"},
+       {ultra.c_str(), "ultra"}});
   sub(menu, L"Position", "level",
       {{L"Above Windows", "aboveWindows"}, {L"Behind Windows", "desktop"}});
   AppendMenu(menu, MF_SEPARATOR, 0, nullptr);
   add(menu, L"Clear All Snow", "clearSnow", false);
   add(menu, L"Show Performance Stats", "toggleStats", StateBool("showStats"));
   AppendMenu(menu, MF_SEPARATOR, 0, nullptr);
+  if (account_enabled) {
+    if (AccountBool("linking")) {
+      AppendMenu(menu, MF_STRING | MF_GRAYED, 0, L"Waiting for sign-in in your browser\u2026");
+    } else if (AccountBool("signedIn")) {
+      const std::wstring who = L"Signed in as " + AccountText("email");
+      AppendMenu(menu, MF_STRING | MF_GRAYED, 0, who.c_str());
+      add(menu, L"Manage Account\u2026", "account:manage", false);
+      add(menu, L"Refresh Pro Status", "account:refresh", false);
+      add(menu, L"Sign Out", "account:signOut", false);
+    } else {
+      add(menu, L"Sign In\u2026", "account:signIn", false);
+    }
+    AppendMenu(menu, MF_SEPARATOR, 0, nullptr);
+  }
   AppendMenu(menu, MF_STRING, kMenuQuit, L"Quit Winter");
 
   POINT pt;
