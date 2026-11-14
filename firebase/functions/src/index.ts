@@ -528,3 +528,33 @@ export const onGrantUpdated = onDocumentUpdated(
     await syncRevokedGrant(after);
   },
 );
+
+// ------------------------------------------------------------- downloads
+
+const RELEASES = defineString("RELEASES_URL", {
+  default: "https://github.com/AkbarshohAbdurashidov/winter/releases/latest/download",
+});
+const DOWNLOADS: Record<string, { file: string; type: string }> = {
+  mac: { file: "Winter-macOS.dmg", type: "application/x-apple-diskimage" },
+  windows: { file: "Winter-Windows-Setup.exe", type: "application/vnd.microsoft.portable-executable" },
+  "windows-zip": { file: "Winter-Windows-portable.zip", type: "application/zip" },
+};
+
+/// /download/mac | /download/windows | /download/windows-zip on the website
+/// (Hosting rewrite). Streams the latest release's file, so the browser
+/// downloads from our domain and never opens GitHub. Hosting's CDN caches it
+/// for an hour, so most downloads don't reach this function at all.
+export const download = onRequest({ memory: "256MiB", timeoutSeconds: 120 }, async (req, res) => {
+  const d = DOWNLOADS[req.path.replace(/^\/(download\/)?/, "").replace(/\/+$/, "")];
+  if (!d) { res.status(404).send("Not found"); return; }
+  const upstream = await fetch(`${RELEASES.value()}/${d.file}`, { redirect: "follow" });
+  if (!upstream.ok || !upstream.body) { res.status(502).send("Download unavailable, try again later."); return; }
+  res.set("Content-Type", d.type);
+  res.set("Content-Disposition", `attachment; filename="${d.file}"`);
+  res.set("Cache-Control", "public, max-age=600, s-maxage=3600");
+  const len = upstream.headers.get("content-length");
+  if (len) res.set("Content-Length", len);
+  if (req.method === "HEAD") { res.end(); return; }
+  const { Readable } = await import("node:stream");
+  Readable.fromWeb(upstream.body as any).pipe(res);
+});
