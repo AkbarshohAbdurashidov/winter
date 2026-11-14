@@ -1,18 +1,18 @@
 # Winter Pro: accounts, payments and the admin panel
 
 ```
- Winter app (Mac/Win)          Web portal (portal/)                     RevenueCat
- ───────────────────           ─────────────────                     ──────────
- ❄ menu: Sign In… ──opens──▶  /link?code=…  email code sign-in
+ Winter app (Mac/Win)          Web portal (portal/, Firebase Hosting)     RevenueCat
+ ───────────────────           ──────────────────────────────────────     ──────────
+ ❄ menu: Sign In… ──opens──▶  /link?code=…  Google or email-link sign-in
                                approves the code
  polls /link/poll ◀── device token
- ❄ menu: Get Winter Pro… ───▶ /upgrade  RevenueCat Web Paywall ───▶ checkout (card,
-                                         (Monthly/Yearly/Lifetime)    Apple Pay, Google Pay)
+ ❄ menu: Get Winter Pro… ───▶ /upgrade  RevenueCat Web Paywall ─────────▶ checkout (card,
+                                         (Monthly/Yearly/Lifetime)         Apple Pay, Google Pay)
                                /account  status, computers,
-                                         Manage subscription ──────▶ customer portal
- /status every 30 min                                                     │ webhook
-        │                                                                 ▼
-        └──────────▶ Supabase: edge functions `app`, `revenuecat-webhook` + Postgres
+                                         Manage subscription ───────────▶ customer portal
+ /status every 30 min                                                          │ webhook
+        │                                                                      ▼
+        └──────────▶ Cloud Functions `app`, `revenuecatWebhook` + Firestore
                      /admin (portal/) reads it: users, trials, buyers, free access
 ```
 
@@ -30,39 +30,37 @@ A build without `WINTER_API_URL` has no account features and nothing is locked.
 version, first/last seen, launch count, and the email of signed-in users. No IP addresses
 and no names. Mention this in your privacy policy.
 
-## 1. Supabase
+## 1. Firebase
 
-1. Create a project at supabase.com. Note the **Project URL** and **anon key**
-   (Settings → API).
-2. Deploy the database and functions:
+1. Create a project at console.firebase.google.com and switch it to the **Blaze** plan.
+   Cloud Functions need it; a small app normally stays within the free quota.
+2. **Authentication** → Sign-in method: enable **Google**, and **Email/Password** with
+   **Email link (passwordless sign-in)** turned on. Under Settings → Authorized domains,
+   add your portal's domain (`<project>.web.app` is already there).
+3. **Firestore**: create the database in production mode (region e.g. `europe-west1`).
+4. Add a **Web app** (Project settings → Your apps). Its config values go into
+   `portal/.env.local` (see `portal/.env.example`).
+5. Deploy from the repo root. The npm CLI is needed; the standalone CLI's bundled Node 20
+   is too old for firebase-admin 14.
    ```sh
-   cd backend
-   supabase link --project-ref <ref>
-   supabase db push
-   supabase functions deploy app revenuecat-webhook --no-verify-jwt
+   npx firebase-tools@15 login
+   npx firebase-tools@15 use --add            # pick your project
+   npx firebase-tools@15 functions:secrets:set REVENUECAT_SECRET_KEY    # RevenueCat secret API key (v1)
+   npx firebase-tools@15 functions:secrets:set REVENUECAT_WEBHOOK_AUTH  # any long random string
+   printf 'PORTAL_URL=https://<project>.web.app\n' > firebase/functions/.env.<project>
+   (cd portal && npm install && npm run build)
+   npx firebase-tools@15 deploy                # functions + Firestore rules + portal hosting
    ```
-3. Secrets (Settings → Edge Functions, or the CLI):
-   ```sh
-   supabase secrets set \
-     PORTAL_URL=https://winter.example.com \
-     REVENUECAT_SECRET_KEY=sk_... \
-     REVENUECAT_WEBHOOK_AUTH=$(openssl rand -hex 24) \
-     REVENUECAT_PURCHASE_LINK=https://pay.rev.cat/<token>   # optional fallback
-   ```
-4. Auth → URL Configuration: set **Site URL** = `PORTAL_URL`, and add
-   `PORTAL_URL/**` to the redirect URLs.
-5. Auth → Email Templates → **Magic Link**: paste
-   `backend/supabase/templates/sign_in.html` (it contains the 6-digit code `{{ .Token }}`).
-6. Auth → SMTP: set up your own SMTP provider (e.g. Resend or Postmark). Supabase's
-   built-in mailer sends only a few emails per hour.
-7. Make yourself an admin (SQL editor):
-   `insert into public.admins(email) values ('you@example.com');`
-   After that, add more admins in the panel.
+   The deploy prints the function URLs, e.g. `https://europe-west1-<project>.cloudfunctions.net/app`.
+   Put that URL into `VITE_API_URL`, then rebuild and redeploy the portal
+   (`npx firebase-tools@15 deploy --only hosting`).
+6. **First admin**: in Firestore, create the collection `admins` with a document whose ID is
+   your email in lower case (field `addedAt` = now). After that, add more admins in the panel.
 
 ## 2. RevenueCat
 
 1. Create a project, then add a **Web Billing** app and connect Stripe.
-2. **Products** (Web Billing app → Products):
+2. **Products**:
    - `monthly`: subscription, 1 month (optionally with a free trial).
    - `yearly`: subscription, 1 year (e.g. a 7-day free trial).
    - `lifetime`: one-time purchase (non-consumable).
@@ -71,66 +69,45 @@ and no names. Mention this in your privacy policy.
    - `$rc_monthly` → `monthly`
    - `$rc_annual` → `yearly`
    - `$rc_lifetime` → `lifetime`
-5. **Paywall**: create one for the `default` offering. The web portal shows it with
-   `presentPaywall`.
+5. **Paywall**: create one for the `default` offering. The portal shows it with `presentPaywall`.
 6. **API keys**:
    - Web Billing **public** key → `VITE_REVENUECAT_WEB_KEY`.
-   - A **secret** key (REST API v1) → `REVENUECAT_SECRET_KEY`.
+   - A **secret** key (REST API v1) → the `REVENUECAT_SECRET_KEY` secret.
 
    The `test_…` key is for the Test Store in the mobile SDKs and isn't used here. For
    testing, use the Web Billing **sandbox** key and Stripe test cards.
 7. **Webhook** (Integrations → Webhooks):
-   - URL: `https://<ref>.supabase.co/functions/v1/revenuecat-webhook`
+   - URL: `https://europe-west1-<project>.cloudfunctions.net/revenuecatWebhook`
    - Authorization header: the `REVENUECAT_WEBHOOK_AUTH` value.
    - Send a test event. It should return 200.
 8. **Apple Pay / Google Pay**: turn them on in Stripe (Settings → Payment methods). For
    Apple Pay, register the portal's domain in Stripe (Payment method domains).
-9. (Optional) Funnels → Purchase Links: copy the production link for
-   `REVENUECAT_PURCHASE_LINK` / `VITE_REVENUECAT_PURCHASE_LINK`. It's used when no web key
-   is set.
 
-## 3. Web portal + admin panel (`portal/`)
+## 3. App builds
 
 ```sh
-cd portal
-cp .env.example .env.local   # fill in the Supabase URL/anon key and the RevenueCat web key
-npm install && npm run dev   # http://localhost:5173
-npm run build                # static files in portal/dist
+WINTER_API_URL=https://europe-west1-<project>.cloudfunctions.net/app scripts/build_macos_dmg.sh
+flutter build windows --release --dart-define=WINTER_API_URL=https://europe-west1-<project>.cloudfunctions.net/app
 ```
 
-Deploy `portal/dist` to any static host. `vercel.json` (Vercel) and `public/_redirects`
-(Cloudflare Pages, Netlify) send every route to the app. Set the same `VITE_*` variables
-in the host's settings. Pages:
-- `/admin`: the panel (admins only; enforced by database RLS, not just the UI).
-- `/account`: the customer's status, computers, and subscription management.
-- `/upgrade`: the paywall.
-- `/link`: used by the app's "Sign In…".
-
-## 4. App builds
-
-```sh
-WINTER_API_URL=https://<ref>.supabase.co/functions/v1/app WINTER_API_KEY=<anon key> \
-  scripts/build_macos_dmg.sh
-flutter build windows --release --dart-define=WINTER_API_URL=... --dart-define=WINTER_API_KEY=...
-```
-
-In GitHub, set the repository **variables** `WINTER_API_URL` and `WINTER_API_KEY`
-(Settings → Secrets and variables → Actions → Variables). The CI installers then include
-accounts. Both values are public by design; never put the RevenueCat secret key or the
-Supabase service key in the app.
+In GitHub, set the repository **variable** `WINTER_API_URL` (Settings → Secrets and
+variables → Actions → Variables). The CI installers then include accounts. Never put the
+RevenueCat secret key in the app.
 
 ## Local development / tests
 
 ```sh
-cd backend && supabase start
-supabase functions serve --env-file <file with PORTAL_URL and REVENUECAT_WEBHOOK_AUTH=local-webhook-secret>
-python3 tests/e2e.py        # 38 checks: sign-in, linking, grants, webhook, RLS
-flutter run -d macos --dart-define=WINTER_API_URL=http://127.0.0.1:54321/functions/v1/app
+npx firebase-tools@15 emulators:start --only auth,firestore,functions --project demo-winter
+python3 firebase/tests/e2e.py      # 43 checks: sign-in, linking, grants, webhook, security rules
+cd portal && npm run dev           # .env.local with VITE_USE_EMULATORS=true (see .env.example)
+flutter run -d macos --dart-define=WINTER_API_URL=http://127.0.0.1:5001/demo-winter/europe-west1/app
 ```
 
-Sign-in emails go to Mailpit at http://127.0.0.1:54324.
+Local secrets live in `firebase/functions/.secret.local` (`REVENUECAT_WEBHOOK_AUTH=local-webhook-secret`,
+`REVENUECAT_SECRET_KEY=unset`). Sign-in links appear in the Auth emulator
+(http://127.0.0.1:4000/auth); the emulator's Google popup accepts any test account.
 
-## How access is decided (server, `functions/_shared/pro.ts`)
+## How access is decided (server, `firebase/functions/src/pro.ts`)
 
 1. An active **free grant** for the user's email (given in the panel; can have an end
    date) → Pro.

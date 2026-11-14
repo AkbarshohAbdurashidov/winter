@@ -1,0 +1,61 @@
+rules_version = '2';
+
+// Clients (the web portal) only read what they're allowed to; everything
+// the desktop app and RevenueCat write goes through Cloud Functions with
+// the Admin SDK, which bypasses these rules.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+    function email() {
+      return request.auth.token.email.lower();
+    }
+    function isAdmin() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(email()));
+    }
+
+    // Document id = lower-case email.
+    match /admins/{adminEmail} {
+      allow read: if isAdmin() || (signedIn() && adminEmail == email());
+      allow create: if isAdmin() && adminEmail == adminEmail.lower()
+        && request.resource.data.keys().hasOnly(['addedAt', 'addedBy']);
+      allow delete: if isAdmin() && adminEmail != email();
+    }
+
+    // Free Pro by email; created/revoked from the admin panel.
+    match /grants/{id} {
+      allow read: if isAdmin();
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasOnly(['email', 'note', 'expiresAt', 'createdBy', 'createdAt', 'revokedAt'])
+        && request.resource.data.email is string
+        && request.resource.data.email == request.resource.data.email.lower()
+        && request.resource.data.createdBy == email()
+        && request.resource.data.revokedAt == null;
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revokedAt']);
+    }
+
+    match /installs/{id} {
+      allow read: if isAdmin();
+    }
+
+    match /devices/{tokenHash} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revokedAt']);
+    }
+
+    match /subscriptions/{uid} {
+      allow read: if isAdmin() || (signedIn() && request.auth.uid == uid);
+    }
+
+    match /revenuecatEvents/{id} {
+      allow read: if isAdmin();
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { Link } from "react-router-dom";
 import { SignIn } from "../components/SignIn";
 import { AccessBadge, Logo, Notice, SnowBackground, Spinner } from "../components/ui";
-import { callApp, formatDate, supabase, timeAgo, type Access } from "../lib/api";
-import { useSession } from "../lib/session";
+import { formatDate, timeAgo, type Access } from "../lib/api";
+import * as data from "../lib/adminData";
+import { signOut, useSession } from "../lib/session";
 
 // ------------------------------------------------------------------ types
 
@@ -20,13 +21,13 @@ interface UserRow {
   subscription_status: string | null; product_id: string | null; period_type: string | null;
   store: string | null; environment: string | null; will_renew: boolean | null; billing_issue: boolean | null;
   purchased_at: string | null; expires_at: string | null; had_trial: boolean | null;
-  converted_from_trial: boolean | null; revenue_usd: number; grant_id: number | null;
+  converted_from_trial: boolean | null; revenue_usd: number; grant_id: string | null;
   grant_expires_at: string | null; grant_note: string | null; installs: number;
   last_seen: string | null; platforms: string | null; access: Access;
 }
 
 interface Grant {
-  id: number; email: string; note: string | null; expires_at: string | null;
+  id: string; email: string; note: string | null; expires_at: string | null;
   created_by: string; created_at: string; revoked_at: string | null;
 }
 
@@ -44,19 +45,19 @@ type Tab = "overview" | "users" | "grants" | "installs" | "admins";
 // ------------------------------------------------------------------ page
 
 export function AdminPage() {
-  const { session, loading } = useSession();
+  const { user, loading } = useSession();
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
 
   useEffect(() => {
-    if (!session) return;
-    supabase.rpc("is_admin").then(({ data }) => setIsAdmin(Boolean(data)));
-  }, [session]);
+    if (!user) return;
+    data.isAdmin().then(setIsAdmin);
+  }, [user]);
 
-  if (loading || (session && isAdmin === null)) {
+  if (loading || (user && isAdmin === null)) {
     return <Centered><Spinner /></Centered>;
   }
-  if (!session) {
+  if (!user) {
     return <Centered><SignIn title="Winter Admin" subtitle="Sign in with an admin email." /></Centered>;
   }
   if (!isAdmin) {
@@ -64,10 +65,10 @@ export function AdminPage() {
       <Centered>
         <div className="glass max-w-md p-8 text-center">
           <h1 className="text-xl font-semibold text-white">No admin access</h1>
-          <p className="mt-2 text-sm text-slate-400">{session.user.email} isn't an admin. Ask an admin to add you.</p>
+          <p className="mt-2 text-sm text-slate-400">{user.email} isn't an admin. Ask an admin to add you.</p>
           <div className="mt-6 flex justify-center gap-2">
             <Link to="/account" className="btn-ghost">My account</Link>
-            <button className="btn-ghost" onClick={() => supabase.auth.signOut()}>Sign out</button>
+            <button className="btn-ghost" onClick={() => signOut()}>Sign out</button>
           </div>
         </div>
       </Centered>
@@ -100,8 +101,8 @@ export function AdminPage() {
           ))}
         </nav>
         <div className="hidden px-5 py-5 text-xs text-slate-500 lg:absolute lg:bottom-0 lg:block lg:w-64">
-          <p className="truncate">{session.user.email}</p>
-          <button className="mt-1 text-slate-400 hover:text-white" onClick={() => supabase.auth.signOut()}>Sign out</button>
+          <p className="truncate">{user.email}</p>
+          <button className="mt-1 text-slate-400 hover:text-white" onClick={() => signOut()}>Sign out</button>
         </div>
       </aside>
       <main className="min-w-0 flex-1 px-4 py-6 sm:px-8 lg:py-8">
@@ -109,7 +110,7 @@ export function AdminPage() {
         {tab === "users" && <Users />}
         {tab === "grants" && <Grants />}
         {tab === "installs" && <Installs />}
-        {tab === "admins" && <Admins self={session.user.email ?? ""} />}
+        {tab === "admins" && <Admins self={user.email ?? ""} />}
       </main>
     </div>
   );
@@ -137,7 +138,7 @@ function Overview({ onOpenUsers }: { onOpenUsers: () => void }) {
   const [stats, setStats] = useState<Stats | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    supabase.rpc("admin_stats").then(({ data, error }) => (error ? setError(error.message) : setStats(data as Stats)));
+    data.fetchStats<Stats>().then(setStats).catch((e) => setError(String(e)));
   }, []);
   if (error) return <Notice tone="error">{error}</Notice>;
   if (!stats) return <div className="grid place-items-center py-24"><Spinner /></div>;
@@ -240,11 +241,12 @@ function Users() {
   const [selected, setSelected] = useState<UserRow | null>(null);
 
   const load = useCallback(async () => {
-    const { data, error } = await supabase.from("admin_users").select("*").order("signed_up_at", { ascending: false }).limit(1000);
-    if (error) setError(error.message);
-    else {
-      setRows(data as UserRow[]);
-      setSelected((s) => (s ? (data as UserRow[]).find((r) => r.user_id === s.user_id) ?? null : null));
+    try {
+      const users = await data.fetchUsers<UserRow>();
+      setRows(users);
+      setSelected((s) => (s ? users.find((r) => r.user_id === s.user_id) ?? null : null));
+    } catch (e) {
+      setError(String(e));
     }
   }, []);
   useEffect(() => { load(); }, [load]);
@@ -337,9 +339,7 @@ function UserDrawer({ user, onClose, onChanged }: { user: UserRow; onClose: () =
   const [message, setMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
 
   const loadDevices = useCallback(() => {
-    supabase.from("devices").select("token_hash, platform, created_at, last_seen, revoked_at")
-      .eq("user_id", user.user_id).order("last_seen", { ascending: false })
-      .then(({ data }) => setDevices((data as Device[]) ?? []));
+    data.fetchDevices(user.user_id).then(setDevices);
   }, [user.user_id]);
   useEffect(() => { loadDevices(); }, [loadDevices]);
 
@@ -358,21 +358,19 @@ function UserDrawer({ user, onClose, onChanged }: { user: UserRow; onClose: () =
   }
 
   const refresh = () => run("refresh", async () => {
-    const r = await callApp<{ ok: boolean; configured: boolean }>("/admin/refresh", { userId: user.user_id });
+    const r = await data.refreshUser(user.user_id);
     if (!r.configured) throw new Error("REVENUECAT_SECRET_KEY isn't set on the server.");
     if (!r.ok) throw new Error("RevenueCat request failed (see function logs).");
     return "Synced with RevenueCat.";
   });
 
   const revokeGrant = () => run("revoke", async () => {
-    const { error } = await supabase.from("grants").update({ revoked_at: new Date().toISOString() }).eq("email", user.email.toLowerCase()).is("revoked_at", null);
-    if (error) throw error;
+    if (user.grant_id) await data.revokeGrant(user.grant_id);
     return "Free access removed.";
   });
 
   const signOutDevice = (hash: string) => run("device", async () => {
-    const { error } = await supabase.from("devices").update({ revoked_at: new Date().toISOString() }).eq("token_hash", hash);
-    if (error) throw error;
+    await data.revokeDevice(hash);
     loadDevices();
     return "Computer signed out.";
   });
@@ -475,10 +473,13 @@ function GrantForm({ email: initialEmail = "", compact = false, onDone }: { emai
     if (duration === "custom" && !expires) { setBusy(false); return setError("Pick an end date."); }
     const clean = email.trim().toLowerCase();
     // One active grant per email: end the previous one first.
-    await supabase.from("grants").update({ revoked_at: new Date().toISOString() }).eq("email", clean).is("revoked_at", null);
-    const { error } = await supabase.from("grants").insert({ email: clean, expires_at: expires, note: note.trim() || null });
+    try {
+      await data.giveGrant(clean, expires ? new Date(expires) : null, note.trim() || null);
+    } catch (e) {
+      setBusy(false);
+      return setError(String(e));
+    }
     setBusy(false);
-    if (error) return setError(error.message);
     if (!compact) { setEmail(""); setNote(""); }
     onDone(`${clean} now has free Winter Pro${expires ? ` until ${formatDate(expires)}` : " forever"}.`);
   }
@@ -515,12 +516,12 @@ function Grants() {
   const [grants, setGrants] = useState<Grant[] | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const load = useCallback(() => {
-    supabase.from("grants").select("*").order("created_at", { ascending: false }).then(({ data }) => setGrants((data as Grant[]) ?? []));
+    data.fetchGrants().then((g) => setGrants(g as Grant[]));
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  async function revoke(id: number) {
-    await supabase.from("grants").update({ revoked_at: new Date().toISOString() }).eq("id", id);
+  async function revoke(id: string) {
+    await data.revokeGrant(id);
     load();
   }
 
@@ -570,10 +571,9 @@ function Installs() {
   const [rows, setRows] = useState<Install[] | null>(null);
   const [emails, setEmails] = useState<Record<string, string>>({});
   useEffect(() => {
-    supabase.from("installs").select("*").order("last_seen", { ascending: false }).limit(500)
-      .then(({ data }) => setRows((data as Install[]) ?? []));
-    supabase.from("admin_users").select("user_id, email").then(({ data }) =>
-      setEmails(Object.fromEntries((data ?? []).map((u: { user_id: string; email: string }) => [u.user_id, u.email]))));
+    data.fetchInstalls().then((r) => setRows(r as Install[]));
+    data.fetchUsers<{ user_id: string; email: string }>().then((users) =>
+      setEmails(Object.fromEntries(users.map((u) => [u.user_id, u.email]))));
   }, []);
   return (
     <>
@@ -623,21 +623,24 @@ function Admins({ self }: { self: string }) {
   const [email, setEmail] = useState("");
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(() => {
-    supabase.from("admins").select("*").order("added_at").then(({ data }) => setAdmins(data ?? []));
+    data.fetchAdmins().then(setAdmins);
   }, []);
   useEffect(() => { load(); }, [load]);
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    const { error } = await supabase.from("admins").insert({ email: email.trim().toLowerCase() });
-    if (error) return setError(error.code === "23505" ? "Already an admin." : error.message);
+    try {
+      await data.addAdmin(email);
+    } catch (e) {
+      return setError(e instanceof Error ? e.message : String(e));
+    }
     setEmail("");
     load();
   }
 
   async function remove(target: string) {
-    await supabase.from("admins").delete().eq("email", target);
+    await data.removeAdmin(target);
     load();
   }
 

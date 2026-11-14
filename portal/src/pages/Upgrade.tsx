@@ -6,27 +6,27 @@ import { Notice, Shell, Snowflake, Spinner } from "../components/ui";
 import { callApp, config, type AccountInfo } from "../lib/api";
 import { useSession } from "../lib/session";
 
-/// RevenueCat Web Paywall for the signed-in user (app_user_id = Supabase
+/// RevenueCat Web Paywall for the signed-in user (app_user_id = Firebase
 /// user id). Shows the current offering (Monthly / Yearly / Lifetime) as
 /// designed in the RevenueCat dashboard; checkout supports card, Apple Pay
 /// and Google Pay. Falls back to the Web Purchase Link without a web key.
 export function UpgradePage() {
-  const { session, loading } = useSession();
+  const { user, loading } = useSession();
   const target = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<"loading" | "paywall" | "owned" | "success" | "error">("loading");
   const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!session) return;
+    if (!user) return;
     let cancelled = false;
     (async () => {
       try {
-        const account = await callApp<AccountInfo>("/account", {}, session);
+        const account = await callApp<AccountInfo>("/account", {});
         if (cancelled) return;
         if (account.pro) return setState("owned");
 
-        const userId = session.user.id;
-        const email = session.user.email ?? undefined;
+        const userId = user.uid;
+        const email = user.email ?? undefined;
         if (!config.revenueCatWebKey) {
           if (config.purchaseLink) {
             const q = email ? `?email=${encodeURIComponent(email)}` : "";
@@ -44,7 +44,7 @@ export function UpgradePage() {
         // Already entitled according to RevenueCat (e.g. webhook not yet processed).
         const info = await purchases.getCustomerInfo();
         if ("winter_pro" in info.entitlements.active) {
-          await callApp("/account", { refresh: true }, session);
+          await callApp("/account", { refresh: true });
           return setState("owned");
         }
 
@@ -57,7 +57,7 @@ export function UpgradePage() {
         });
         if (cancelled) return;
         const active = "winter_pro" in result.customerInfo.entitlements.active;
-        await callApp("/account", { refresh: true }, session); // sync our backend now
+        await callApp("/account", { refresh: true }); // sync our backend now
         setState(active ? "success" : "error");
         if (!active) setMessage("The purchase finished but Pro isn't active yet. Refresh your account in a minute.");
       } catch (e) {
@@ -73,10 +73,10 @@ export function UpgradePage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [session]);
+  }, [user]);
 
   if (loading) return <Shell><div className="grid place-items-center py-24"><Spinner /></div></Shell>;
-  if (!session) {
+  if (!user) {
     return <Shell><div className="pt-10"><SignIn title="Get Winter Pro" subtitle="Sign in first so Pro is linked to your account." /></div></Shell>;
   }
 

@@ -11,22 +11,22 @@ export function LinkPage() {
   const [params] = useSearchParams();
   const code = params.get("code") ?? "";
   const next = params.get("next");
-  const { session, loading } = useSession();
+  const { user, loading } = useSession();
   const navigate = useNavigate();
   const [state, setState] = useState<"idle" | "linking" | "done" | "expired" | "error">("idle");
   const started = useRef(false);
 
   useEffect(() => {
-    if (!session || !code || started.current) return;
+    if (!user || !code || started.current) return;
     started.current = true;
     setState("linking");
-    callApp("/link/approve", { code }, session)
+    callApp("/link/approve", { code })
       .then(() => {
         setState("done");
         if (next === "upgrade") setTimeout(() => navigate("/upgrade"), 1200);
       })
       .catch((e) => setState(e instanceof ApiError && e.status === 410 ? "expired" : "error"));
-  }, [session, code, next, navigate]);
+  }, [user, code, next, navigate]);
 
   return (
     <Shell>
@@ -35,7 +35,7 @@ export function LinkPage() {
           <div className="mx-auto max-w-md"><Notice tone="error">This link is missing its code. Choose “Sign In…” in Winter again.</Notice></div>
         ) : loading ? (
           <div className="grid place-items-center py-24"><Spinner /></div>
-        ) : !session ? (
+        ) : !user ? (
           <SignIn title="Connect Winter" subtitle="Sign in to link Winter on this computer." />
         ) : (
           <div className="glass mx-auto max-w-md p-8 text-center">
@@ -47,7 +47,7 @@ export function LinkPage() {
               <>
                 <h1 className="text-xl font-semibold text-white">Winter is connected</h1>
                 <p className="mt-2 text-sm text-slate-400">
-                  Signed in as {session.user.email}. {next === "upgrade" ? "Taking you to Winter Pro…" : "You can close this tab and go back to your desktop."}
+                  Signed in as {user.email}. {next === "upgrade" ? "Taking you to Winter Pro…" : "You can close this tab and go back to your desktop."}
                 </p>
                 {next !== "upgrade" && <Link to="/account" className="btn-ghost mt-6">View account</Link>}
               </>

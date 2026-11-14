@@ -1,8 +1,8 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import type { Access } from "../lib/api";
-import { accessLabel, supabase } from "../lib/api";
-import { useSession } from "../lib/session";
+import { accessLabel } from "../lib/api";
+import { signOut, useSession } from "../lib/session";
 
 export function Logo({ small = false }: { small?: boolean }) {
   return (
@@ -65,17 +65,17 @@ export function SnowBackground() {
 }
 
 export function Shell({ children, wide = false }: { children: ReactNode; wide?: boolean }) {
-  const { session } = useSession();
+  const { user } = useSession();
   return (
     <div className="min-h-screen">
       <SnowBackground />
       <header className={`mx-auto flex items-center justify-between px-4 py-5 sm:px-6 ${wide ? "max-w-7xl" : "max-w-5xl"}`}>
         <Logo />
         <nav className="flex items-center gap-2 text-sm">
-          {session ? (
+          {user ? (
             <>
               <Link to="/account" className="btn-ghost !py-2">Account</Link>
-              <button className="btn !px-3 !py-2 text-slate-400 hover:text-white" onClick={() => supabase.auth.signOut()}>
+              <button className="btn !px-3 !py-2 text-slate-400 hover:text-white" onClick={() => signOut()}>
                 Sign out
               </button>
             </>

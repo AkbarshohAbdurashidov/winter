@@ -6,10 +6,10 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 
 /// Backend endpoint, set at build time:
-///   `--dart-define=WINTER_API_URL=https://PROJECT.supabase.co/functions/v1/app`
+///   `--dart-define=WINTER_API_URL=https://europe-west1-PROJECT.cloudfunctions.net/app`
 /// Empty = account features off (the free app works without a backend).
 const String kWinterApiUrl = String.fromEnvironment('WINTER_API_URL');
-const String kWinterApiKey = String.fromEnvironment('WINTER_API_KEY'); // Supabase anon key (public)
+const String kWinterApiKey = String.fromEnvironment('WINTER_API_KEY'); // optional; not needed for Firebase
 const String kAppVersion = String.fromEnvironment('WINTER_VERSION', defaultValue: '1.0.0');
 
 /// What the backend says about this computer's account.
@@ -378,7 +378,8 @@ class AccountService extends ChangeNotifier {
 
   Future<void> openAccount() async {
     if (!enabled || !owner) return;
-    final url = _status.accountUrl ?? kWinterApiUrl.replaceAll(RegExp(r'/functions/v1/app$'), '');
+    final url = _status.accountUrl;
+    if (url == null) return;
     await _openUrl(url);
   }
 

@@ -1,15 +1,30 @@
-import { createClient, type Session } from "@supabase/supabase-js";
+import { initializeApp } from "firebase/app";
+import { connectAuthEmulator, getAuth } from "firebase/auth";
+import { connectFirestoreEmulator, getFirestore, Timestamp } from "firebase/firestore";
 
 export const config = {
-  supabaseUrl: import.meta.env.VITE_SUPABASE_URL as string,
-  supabaseAnonKey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
+  firebase: {
+    apiKey: import.meta.env.VITE_FIREBASE_API_KEY as string,
+    authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN as string,
+    projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID as string,
+    appId: import.meta.env.VITE_FIREBASE_APP_ID as string,
+  },
+  /// The `app` Cloud Function, e.g. https://europe-west1-<project>.cloudfunctions.net/app
+  apiUrl: ((import.meta.env.VITE_API_URL as string) || "").replace(/\/+$/, ""),
+  useEmulators: import.meta.env.VITE_USE_EMULATORS === "true",
   revenueCatWebKey: (import.meta.env.VITE_REVENUECAT_WEB_KEY as string) || "",
   purchaseLink: ((import.meta.env.VITE_REVENUECAT_PURCHASE_LINK as string) || "").replace(/\/+$/, ""),
   downloadMac: (import.meta.env.VITE_DOWNLOAD_MAC as string) || "#",
   downloadWindows: (import.meta.env.VITE_DOWNLOAD_WINDOWS as string) || "#",
 };
 
-export const supabase = createClient(config.supabaseUrl, config.supabaseAnonKey);
+export const firebaseApp = initializeApp(config.firebase);
+export const auth = getAuth(firebaseApp);
+export const db = getFirestore(firebaseApp);
+if (config.useEmulators) {
+  connectAuthEmulator(auth, "http://127.0.0.1:9099", { disableWarnings: true });
+  connectFirestoreEmulator(db, "127.0.0.1", 8080);
+}
 
 export type Access = "free" | "trial" | "active" | "lifetime" | "expired" | "refunded" | "none";
 
@@ -36,22 +51,22 @@ export class ApiError extends Error {
   }
 }
 
-/// Calls the `app` edge function as the signed-in user.
-export async function callApp<T>(path: string, body: unknown = {}, session?: Session | null): Promise<T> {
-  const s = session ?? (await supabase.auth.getSession()).data.session;
-  const res = await fetch(`${config.supabaseUrl}/functions/v1/app${path}`, {
+/// Calls the `app` Cloud Function as the signed-in user.
+export async function callApp<T>(path: string, body: unknown = {}): Promise<T> {
+  const token = await auth.currentUser?.getIdToken();
+  const res = await fetch(`${config.apiUrl}${path}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      apikey: config.supabaseAnonKey,
-      ...(s ? { Authorization: `Bearer ${s.access_token}` } : {}),
-    },
+    headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new ApiError(res.status, data?.error ?? res.statusText);
   return data as T;
 }
+
+/// Firestore Timestamp (or ISO string) -> ISO string.
+export const toIso = (v: unknown): string | null =>
+  v instanceof Timestamp ? v.toDate().toISOString() : typeof v === "string" ? v : null;
 
 export const accessLabel: Record<Access, string> = {
   free: "Free access",

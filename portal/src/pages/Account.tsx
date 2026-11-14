@@ -8,29 +8,29 @@ import { useSession } from "../lib/session";
 const productName: Record<string, string> = { lifetime: "Lifetime", yearly: "Yearly", monthly: "Monthly" };
 
 export function useAccount() {
-  const { session } = useSession();
+  const { user } = useSession();
   const [info, setInfo] = useState<AccountInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const load = useCallback(async (refresh = false) => {
-    if (!session) return;
+    if (!user) return;
     try {
-      setInfo(await callApp<AccountInfo>("/account", { refresh }, session));
+      setInfo(await callApp<AccountInfo>("/account", { refresh }));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [session]);
+  }, [user]);
   useEffect(() => { load(); }, [load]);
   return { info, error, reload: load };
 }
 
 export function AccountPage() {
-  const { session, loading } = useSession();
+  const { user, loading } = useSession();
   const { info, error, reload } = useAccount();
   const [refreshing, setRefreshing] = useState(false);
 
   if (loading) return <Shell><div className="grid place-items-center py-24"><Spinner /></div></Shell>;
-  if (!session) return <Shell><div className="pt-10"><SignIn /></div></Shell>;
+  if (!user) return <Shell><div className="pt-10"><SignIn /></div></Shell>;
 
   async function refresh() {
     setRefreshing(true);
@@ -49,7 +49,7 @@ export function AccountPage() {
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <p className="text-sm text-slate-400">Signed in as</p>
-            <h1 className="text-2xl font-semibold text-white">{session.user.email}</h1>
+            <h1 className="text-2xl font-semibold text-white">{user.email}</h1>
           </div>
           {info?.isAdmin && <Link to="/admin" className="btn-ghost">Open admin panel →</Link>}
         </div>
