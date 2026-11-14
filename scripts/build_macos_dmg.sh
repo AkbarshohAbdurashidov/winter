@@ -13,7 +13,7 @@ DMG=dist/Winter-$VERSION-macOS.dmg
 DEFINES=()
 [ -n "${WINTER_API_URL:-}" ] && DEFINES+=(--dart-define=WINTER_API_URL="$WINTER_API_URL")
 [ -n "${WINTER_API_KEY:-}" ] && DEFINES+=(--dart-define=WINTER_API_KEY="$WINTER_API_KEY")
-flutter build macos --release "${DEFINES[@]+"${DEFINES[@]}"}"
+flutter build macos --release "${DEFINES[@]}"
 # Re-sign ad hoc so the bundle is consistently signed (no Developer ID available).
 codesign --force --deep --sign - "$APP"
 codesign --verify --deep --strict "$APP"
