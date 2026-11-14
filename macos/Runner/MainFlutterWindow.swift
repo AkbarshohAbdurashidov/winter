@@ -492,7 +492,7 @@ final class OverlayManager: NSObject {
       menu.addItem(.separator())
     }
 
-    // Pro-only options stay visible; choosing one without Pro opens the paywall.
+    // Pro-only options stay visible; choosing one without Pro opens the Pro request page.
     let proTag = pro ? "" : "  (Pro)"
     menu.addItem(submenu("Snowfall", key: "intensity", current: menuState["intensity"] as? String, options: [
       ("Light", "light"), ("Normal", "normal"), ("Heavy" + proTag, "heavy"), ("Blizzard" + proTag, "blizzard"),

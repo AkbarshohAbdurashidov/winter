@@ -8,7 +8,7 @@ import { SessionProvider } from "./lib/session";
 import { AccountPage } from "./pages/Account";
 import { LinkPage } from "./pages/Link";
 
-// The admin panel and the RevenueCat paywall are loaded on demand.
+// The admin panel and the Pro request page are loaded on demand.
 const AdminPage = lazy(() => import("./pages/Admin").then((m) => ({ default: m.AdminPage })));
 const UpgradePage = lazy(() => import("./pages/Upgrade").then((m) => ({ default: m.UpgradePage })));
 

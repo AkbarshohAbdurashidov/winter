@@ -1,7 +1,7 @@
 import { useEffect, useRef, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import type { Access } from "../lib/api";
-import { accessLabel } from "../lib/api";
+import type { Access, RequestStatus } from "../lib/api";
+import { accessLabel, requestLabel } from "../lib/api";
 import { signOut, useSession } from "../lib/session";
 
 export function Logo({ small = false }: { small?: boolean }) {
@@ -89,24 +89,26 @@ export function Shell({ children, wide = false }: { children: ReactNode; wide?: 
   );
 }
 
-const badgeTone: Record<Access, string> = {
-  free: "bg-violet-400/15 text-violet-200 ring-violet-300/30",
-  trial: "bg-amber-400/15 text-amber-200 ring-amber-300/30",
-  active: "bg-emerald-400/15 text-emerald-200 ring-emerald-300/30",
-  lifetime: "bg-sky-400/15 text-sky-200 ring-sky-300/30",
-  expired: "bg-slate-400/10 text-slate-300 ring-slate-300/20",
-  refunded: "bg-rose-400/15 text-rose-200 ring-rose-300/30",
+const badgeTone: Record<Access | RequestStatus, string> = {
+  pro: "bg-sky-400/15 text-sky-200 ring-sky-300/30",
   none: "bg-white/5 text-slate-400 ring-white/10",
+  pending: "bg-amber-400/15 text-amber-200 ring-amber-300/30",
+  approved: "bg-emerald-400/15 text-emerald-200 ring-emerald-300/30",
+  rejected: "bg-rose-400/15 text-rose-200 ring-rose-300/30",
+  revoked: "bg-slate-400/10 text-slate-300 ring-slate-300/20",
 };
 
-export function AccessBadge({ access }: { access: Access }) {
+function Badge({ tone, children }: { tone: Access | RequestStatus; children: ReactNode }) {
   return (
-    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-medium ring-1 ${badgeTone[access]}`}>
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-medium ring-1 ${badgeTone[tone]}`}>
       <span className="h-1.5 w-1.5 rounded-full bg-current" />
-      {accessLabel[access]}
+      {children}
     </span>
   );
 }
+
+export const AccessBadge = ({ access }: { access: Access }) => <Badge tone={access}>{accessLabel[access]}</Badge>;
+export const RequestBadge = ({ status }: { status: RequestStatus }) => <Badge tone={status}>{requestLabel[status]}</Badge>;
 
 export function Spinner({ className = "h-5 w-5" }: { className?: string }) {
   return <span className={`inline-block animate-spin rounded-full border-2 border-current border-t-transparent ${className}`} />;

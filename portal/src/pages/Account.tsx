@@ -1,20 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { SignIn } from "../components/SignIn";
-import { AccessBadge, Notice, Shell, Spinner } from "../components/ui";
+import { AccessBadge, Notice, RequestBadge, Shell, Spinner } from "../components/ui";
 import { callApp, formatDate, timeAgo, type AccountInfo } from "../lib/api";
 import { useSession } from "../lib/session";
-
-const productName: Record<string, string> = { lifetime: "Lifetime", yearly: "Yearly", monthly: "Monthly" };
 
 export function useAccount() {
   const { user } = useSession();
   const [info, setInfo] = useState<AccountInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const load = useCallback(async (refresh = false) => {
+  const load = useCallback(async () => {
     if (!user) return;
     try {
-      setInfo(await callApp<AccountInfo>("/account", { refresh }));
+      setInfo(await callApp<AccountInfo>("/account"));
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -34,7 +32,7 @@ export function AccountPage() {
 
   async function refresh() {
     setRefreshing(true);
-    await reload(true);
+    await reload();
     setRefreshing(false);
   }
 
@@ -70,33 +68,24 @@ export function AccountPage() {
                       <AccessBadge access={info.access} />
                     </div>
                     <p className="mt-2 text-sm text-slate-400">
-                      {info.access === "free" && (info.expiresAt ? `Free access until ${formatDate(info.expiresAt)}.` : "You have free access. Enjoy!")}
-                      {info.access === "lifetime" && "Lifetime purchase — yours forever."}
-                      {(info.access === "trial" || info.access === "active") && (
-                        <>
-                          {productName[info.productId ?? ""] ?? info.productId} plan ·{" "}
-                          {info.willRenew === false ? "ends" : info.access === "trial" ? "trial ends, then renews" : "renews"}{" "}
-                          {formatDate(info.expiresAt)}
-                        </>
-                      )}
-                      {(info.access === "none" || info.access === "expired" || info.access === "refunded") &&
+                      {info.pro && (info.expiresAt ? `Pro until ${formatDate(info.expiresAt)}.` : "Heavy snowfall, blizzards and Ultra quality are on. Enjoy!")}
+                      {!info.pro && info.request?.status === "pending" && "Your Pro request is waiting for review. Pro turns on automatically once it's approved."}
+                      {!info.pro && info.request?.status !== "pending" &&
                         "Heavy snowfall, blizzards and the highest quality settings come with Winter Pro."}
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {!info.pro && <Link to="/upgrade" className="btn-primary">Get Winter Pro</Link>}
-                    {info.manageUrl && info.access !== "free" && (
-                      <a href={info.manageUrl} target="_blank" rel="noreferrer" className="btn-ghost">Manage subscription</a>
-                    )}
+                    {!info.pro && info.request?.status !== "pending" && <Link to="/upgrade" className="btn-primary">Get Winter Pro</Link>}
                     <button onClick={refresh} className="btn-ghost" disabled={refreshing}>
                       {refreshing ? <Spinner className="h-4 w-4" /> : "Refresh"}
                     </button>
                   </div>
                 </div>
               </div>
-              {info.manageUrl && info.access !== "free" && (
-                <div className="border-t border-white/5 bg-white/[0.02] px-6 py-3 text-xs text-slate-400 sm:px-8">
-                  Cancel, change plan, update your card or download receipts in the customer portal.
+              {info.request && (
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/5 bg-white/[0.02] px-6 py-3 text-xs text-slate-400 sm:px-8">
+                  <span>Pro request · {formatDate(info.request.created_at)}</span>
+                  <RequestBadge status={info.request.status} />
                 </div>
               )}
             </section>

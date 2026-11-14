@@ -2,13 +2,16 @@ import {
   isSignInWithEmailLink, onAuthStateChanged, signInWithEmailLink, signOut as fbSignOut, type User,
 } from "firebase/auth";
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
-import { auth } from "./api";
+import { auth, callApp } from "./api";
 
 export const EMAIL_KEY = "winterEmailForSignIn";
 
 // A sign-in link works once; never complete it twice (React StrictMode
 // runs effects twice in development).
 let linkHandled = false;
+// Registers the user once per page load (the server notifies the admin bot
+// the first time it sees an account).
+const greeted = new Set<string>();
 
 interface SessionState {
   user: User | null;
@@ -67,6 +70,10 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     return onAuthStateChanged(auth, (u) => {
       setUser(u);
       setLoading(false);
+      if (u?.emailVerified && !greeted.has(u.uid)) {
+        greeted.add(u.uid);
+        callApp("/hello").catch(() => greeted.delete(u.uid));
+      }
     });
   }, [completeEmailLink]);
 

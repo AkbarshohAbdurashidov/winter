@@ -584,7 +584,7 @@ void FlutterWindow::ShowTrayMenu() {
 
   const bool account_enabled = AccountBool("enabled");
   const bool pro = !account_enabled || AccountBool("pro");
-  // Pro-only options stay visible; choosing one without Pro opens the paywall.
+  // Pro-only options stay visible; choosing one without Pro opens the Pro request page.
   const std::wstring pro_tag = pro ? L"" : L"  (Pro)";
   const std::wstring heavy = L"Heavy" + pro_tag, blizzard = L"Blizzard" + pro_tag;
   const std::wstring high = L"High" + pro_tag, ultra = L"Ultra" + pro_tag;

@@ -239,7 +239,7 @@ class OverlayController extends ChangeNotifier {
     }
   }
 
-  /// A Pro-only option was chosen without Pro: open the paywall (once,
+  /// A Pro-only option was chosen without Pro: open the Pro request page (once,
   /// from the first screen) and keep the current setting.
   void _offerPro() {
     final a = account;

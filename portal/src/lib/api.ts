@@ -12,8 +12,6 @@ export const config = {
   /// The `app` Cloud Function, e.g. https://europe-west1-<project>.cloudfunctions.net/app
   apiUrl: ((import.meta.env.VITE_API_URL as string) || "").replace(/\/+$/, ""),
   useEmulators: import.meta.env.VITE_USE_EMULATORS === "true",
-  revenueCatWebKey: (import.meta.env.VITE_REVENUECAT_WEB_KEY as string) || "",
-  purchaseLink: ((import.meta.env.VITE_REVENUECAT_PURCHASE_LINK as string) || "").replace(/\/+$/, ""),
   downloadMac: (import.meta.env.VITE_DOWNLOAD_MAC as string) || "#",
   downloadWindows: (import.meta.env.VITE_DOWNLOAD_WINDOWS as string) || "#",
 };
@@ -26,7 +24,20 @@ if (config.useEmulators) {
   connectFirestoreEmulator(db, "127.0.0.1", 8080);
 }
 
-export type Access = "free" | "trial" | "active" | "lifetime" | "expired" | "refunded" | "none";
+export type Access = "pro" | "none";
+export type RequestStatus = "pending" | "approved" | "rejected" | "revoked";
+
+export interface ProRequest {
+  id: string;
+  status: RequestStatus;
+  name: string;
+  email: string;
+  telegram: string | null;
+  phone: string | null;
+  created_at: string | null;
+  decided_at: string | null;
+  decided_by: string | null;
+}
 
 export interface AccountInfo {
   signedIn: boolean;
@@ -34,12 +45,9 @@ export interface AccountInfo {
   userId: string;
   pro: boolean;
   access: Access;
-  productId: string | null;
   expiresAt: string | null;
-  willRenew: boolean | null;
-  hadTrial: boolean;
-  manageUrl: string | null;
   grantNote?: string | null;
+  request: ProRequest | null;
   upgradeUrl: string;
   isAdmin: boolean;
   devices: { token_hash: string; platform: string | null; created_at: string; last_seen: string }[];
@@ -69,13 +77,15 @@ export const toIso = (v: unknown): string | null =>
   v instanceof Timestamp ? v.toDate().toISOString() : typeof v === "string" ? v : null;
 
 export const accessLabel: Record<Access, string> = {
-  free: "Free access",
-  trial: "Free trial",
-  active: "Subscribed",
-  lifetime: "Lifetime",
-  expired: "Expired",
-  refunded: "Refunded",
-  none: "Not subscribed",
+  pro: "Winter Pro",
+  none: "Free",
+};
+
+export const requestLabel: Record<RequestStatus, string> = {
+  pending: "Pending",
+  approved: "Approved",
+  rejected: "Rejected",
+  revoked: "Pro removed",
 };
 
 export function formatDate(iso: string | null | undefined, withTime = false): string {

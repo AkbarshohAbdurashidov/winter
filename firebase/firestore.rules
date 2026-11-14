@@ -1,7 +1,7 @@
 rules_version = '2';
 
 // Clients (the web portal) only read what they're allowed to; everything
-// the desktop app and RevenueCat write goes through Cloud Functions with
+// the desktop app and the Telegram bot write goes through Cloud Functions with
 // the Admin SDK, which bypasses these rules.
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -33,7 +33,18 @@ service cloud.firestore {
         && request.resource.data.createdBy == email()
         && request.resource.data.revokedAt == null;
       allow update: if isAdmin()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revokedAt']);
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revokedAt', 'revokedBy'])
+        && (!('revokedBy' in request.resource.data) || request.resource.data.revokedBy == email());
+    }
+
+    // Pro requests: created and decided only through Cloud Functions, so
+    // the admin panel and the Telegram bot always go through one code path.
+    match /proRequests/{id} {
+      allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
+    }
+
+    match /users/{uid} {
+      allow read: if isAdmin() || (signedIn() && request.auth.uid == uid);
     }
 
     match /installs/{id} {
@@ -44,14 +55,6 @@ service cloud.firestore {
       allow read: if isAdmin() || (signedIn() && resource.data.userId == request.auth.uid);
       allow update: if isAdmin()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['revokedAt']);
-    }
-
-    match /subscriptions/{uid} {
-      allow read: if isAdmin() || (signedIn() && request.auth.uid == uid);
-    }
-
-    match /revenuecatEvents/{id} {
-      allow read: if isAdmin();
     }
 
     match /{document=**} {

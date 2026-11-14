@@ -2,10 +2,10 @@
 // for admins by firebase/firestore.rules); joins that need Firebase Auth
 // (the user list, stats) come from the `app` Cloud Function.
 import {
-  addDoc, collection, deleteDoc, doc, getDoc, getDocs, limit, orderBy, query, serverTimestamp, setDoc,
+  addDoc, collection, deleteDoc, doc, getDoc, getDocs, limit, onSnapshot, orderBy, query, serverTimestamp, setDoc,
   Timestamp, updateDoc, where,
 } from "firebase/firestore";
-import { auth, callApp, db, toIso } from "./api";
+import { auth, callApp, db, toIso, type ProRequest, type RequestStatus } from "./api";
 
 const me = () => (auth.currentUser?.email ?? "").toLowerCase();
 
@@ -20,8 +20,35 @@ export async function isAdmin(): Promise<boolean> {
 
 export const fetchStats = <T>() => callApp<T>("/admin/stats");
 export const fetchUsers = async <T>() => (await callApp<{ users: T[] }>("/admin/users")).users;
-export const refreshUser = (userId: string) =>
-  callApp<{ ok: boolean; configured: boolean }>("/admin/refresh", { userId });
+
+/// Live list of Pro requests: changes made in Telegram show up immediately.
+export function watchRequests(onChange: (rows: ProRequest[]) => void, onError: (e: Error) => void) {
+  return onSnapshot(query(collection(db, "proRequests"), orderBy("createdAt", "desc"), limit(500)), (snap) => {
+    onChange(snap.docs.map((d) => ({
+      id: d.id,
+      status: d.get("status") as RequestStatus,
+      name: d.get("name") as string,
+      email: d.get("email") as string,
+      telegram: (d.get("telegram") as string | null) ?? null,
+      phone: (d.get("phone") as string | null) ?? null,
+      created_at: toIso(d.get("createdAt")),
+      decided_at: toIso(d.get("decidedAt")),
+      decided_by: (d.get("decidedBy") as string | null) ?? null,
+    })));
+  }, onError);
+}
+
+/// Approve / reject / revoke goes through the server so the bot message is
+/// updated too.
+export const decideRequest = (id: string, action: "approve" | "reject" | "revoke") =>
+  callApp<{ status: RequestStatus; changed: boolean }>("/admin/requests/decide", { id, action });
+
+export interface TelegramStatus {
+  configured: boolean; chatId: string | null; bot: { username: string; name: string } | null;
+  webhookUrl: string | null; expectedUrl: string; pending: number; lastError: string | null;
+}
+export const telegramStatus = () => callApp<TelegramStatus>("/admin/telegram/status");
+export const telegramConnect = () => callApp<{ ok: boolean }>("/admin/telegram/connect");
 
 export async function fetchDevices(userId: string) {
   const snap = await getDocs(query(collection(db, "devices"), where("userId", "==", userId)));
@@ -46,10 +73,12 @@ export async function fetchGrants() {
     created_by: d.get("createdBy") as string,
     created_at: toIso(d.get("createdAt")) ?? "",
     revoked_at: toIso(d.get("revokedAt")),
+    request_id: (d.get("requestId") as string | null) ?? null,
   }));
 }
 
-export const revokeGrant = (id: string) => updateDoc(doc(db, "grants", id), { revokedAt: serverTimestamp() });
+export const revokeGrant = (id: string) =>
+  updateDoc(doc(db, "grants", id), { revokedAt: serverTimestamp(), revokedBy: me() });
 
 /// One active grant per email: ends the previous ones, then adds the new one.
 export async function giveGrant(email: string, expiresAt: Date | null, note: string | null) {

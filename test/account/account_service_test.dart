@@ -124,10 +124,10 @@ void main() {
     await s.start();
     api.approved = true;
     await s.signIn();
-    api.status = {'signedIn': true, 'email': 'a@b.c', 'pro': true, 'access': 'lifetime'};
+    api.status = {'signedIn': true, 'email': 'a@b.c', 'pro': true, 'access': 'pro'};
     await s.refresh();
     expect(s.isPro, isTrue);
-    expect(s.status.label, 'Lifetime');
+    expect(s.status.label, '', reason: 'Pro without an end date: just "Winter Pro"');
     api.online = false;
     final restarted = service();
     await restarted.start();
@@ -139,11 +139,13 @@ void main() {
 
   test('cached Pro expires after the offline grace period', () {
     final checked = DateTime(2026, 1, 1);
-    final status = ProStatus(signedIn: true, pro: true, access: 'lifetime', checkedAt: checked);
+    final status = ProStatus(signedIn: true, pro: true, access: 'pro', checkedAt: checked);
     expect(status.proAt(checked.add(const Duration(days: 13))), isTrue);
     expect(status.proAt(checked.add(const Duration(days: 15))), isFalse);
-    final sub = ProStatus(signedIn: true, pro: true, access: 'active', checkedAt: checked, expiresAt: checked.add(const Duration(days: 30)));
-    expect(sub.proAt(checked.add(const Duration(days: 31))), isFalse, reason: 'period ended; needs a fresh check');
+    final until = ProStatus(signedIn: true, pro: true, access: 'pro', checkedAt: checked, expiresAt: DateTime(2026, 1, 31, 12));
+    expect(until.proAt(checked.add(const Duration(days: 9))), isTrue);
+    expect(until.proAt(checked.add(const Duration(days: 31))), isFalse, reason: 'Pro given until a date ends then');
+    expect(until.label, 'until 2026-01-31');
   });
 
   test('a token revoked on the server signs the app out', () async {
@@ -192,7 +194,7 @@ void main() {
       final platform = FakePlatform();
       final s = service();
       api.approved = true;
-      api.status = {'signedIn': true, 'email': 'a@b.c', 'pro': true, 'access': 'trial'};
+      api.status = {'signedIn': true, 'email': 'a@b.c', 'pro': true, 'access': 'pro'};
       await s.start();
       await s.signIn();
       final c = OverlayController(platform: platform, account: s);
@@ -202,9 +204,10 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
       expect(c.intensity, SnowIntensity.blizzard);
       expect(c.quality, QualityPreset.ultra);
-      expect(platform.menu!.account.planLabel, 'Free trial');
+      expect(platform.menu!.account.planLabel, '');
+      expect(platform.menu!.account.pro, isTrue);
 
-      api.status = {'signedIn': true, 'email': 'a@b.c', 'pro': false, 'access': 'expired'};
+      api.status = {'signedIn': true, 'email': 'a@b.c', 'pro': false, 'access': 'none'};
       await s.refresh();
       expect(c.intensity, SnowIntensity.normal);
       expect(c.quality, QualityPreset.medium);

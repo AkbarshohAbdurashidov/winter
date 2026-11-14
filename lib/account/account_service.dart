@@ -20,7 +20,6 @@ class ProStatus {
     this.email,
     this.pro = false,
     this.access = 'none',
-    this.productId,
     this.expiresAt,
     this.upgradeUrl,
     this.accountUrl,
@@ -31,9 +30,8 @@ class ProStatus {
   final String? email;
   final bool pro;
 
-  /// free | trial | active | lifetime | expired | refunded | none
+  /// pro | none
   final String access;
-  final String? productId;
   final DateTime? expiresAt;
   final String? upgradeUrl;
   final String? accountUrl;
@@ -45,32 +43,24 @@ class ProStatus {
   /// Pro, also when the backend can't be reached for a while.
   bool proAt(DateTime now) {
     if (!pro) return false;
-    if (expiresAt != null && expiresAt!.isBefore(now) && access != 'free') {
-      // A subscription period ended since the last check; the next check
-      // decides (renewals keep it active).
-      return checkedAt != null && now.difference(checkedAt!) < const Duration(hours: 1);
-    }
+    // Pro given until a date ends then, online or not.
+    if (expiresAt != null && expiresAt!.isBefore(now)) return false;
     return checkedAt == null || now.difference(checkedAt!) < offlineGrace;
   }
 
-  String get label => switch (access) {
-        'free' => 'Free access',
-        'trial' => 'Free trial',
-        'active' => switch (productId) {
-            'yearly' => 'Yearly',
-            'monthly' => 'Monthly',
-            _ => 'Subscribed',
-          },
-        'lifetime' => 'Lifetime',
-        _ => 'Free version',
-      };
+  /// Shown after "Winter Pro" in the menu: empty, or the end date.
+  String get label {
+    final e = expiresAt?.toLocal();
+    if (!pro || e == null) return '';
+    String two(int n) => n.toString().padLeft(2, '0');
+    return 'until ${e.year}-${two(e.month)}-${two(e.day)}';
+  }
 
   factory ProStatus.fromJson(Map<String, Object?> j) => ProStatus(
         signedIn: j['signedIn'] == true,
         email: j['email'] as String?,
         pro: j['pro'] == true,
         access: (j['access'] as String?) ?? 'none',
-        productId: j['productId'] as String?,
         expiresAt: DateTime.tryParse((j['expiresAt'] as String?) ?? ''),
         upgradeUrl: j['upgradeUrl'] as String?,
         accountUrl: j['accountUrl'] as String?,
@@ -82,7 +72,6 @@ class ProStatus {
         'email': email,
         'pro': pro,
         'access': access,
-        'productId': productId,
         'expiresAt': expiresAt?.toIso8601String(),
         'upgradeUrl': upgradeUrl,
         'accountUrl': accountUrl,
@@ -298,7 +287,7 @@ class AccountService extends ChangeNotifier {
   }
 
   /// Opens the browser to sign in; this app receives its token once the
-  /// user approves. [next] = 'upgrade' continues to the paywall.
+  /// user approves. [next] = 'upgrade' continues to the Pro request page.
   Future<void> signIn({String? next}) async {
     final api = _api;
     if (api == null || !owner || _linking) return;
@@ -367,8 +356,8 @@ class AccountService extends ChangeNotifier {
     }
   }
 
-  /// "Get Winter Pro": straight to the paywall when signed in, otherwise
-  /// sign in first and continue to the paywall in the browser.
+  /// "Get Winter Pro": straight to the Pro request page when signed in, otherwise
+  /// sign in first and continue to it in the browser.
   Future<void> upgrade() async {
     if (!enabled || !owner) return;
     if (_token == null) return signIn(next: 'upgrade');

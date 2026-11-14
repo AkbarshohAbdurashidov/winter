@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { SignIn } from "../components/SignIn";
-import { AccessBadge, Logo, Notice, SnowBackground, Spinner } from "../components/ui";
-import { formatDate, timeAgo, type Access } from "../lib/api";
+import { AccessBadge, Logo, Notice, RequestBadge, SnowBackground, Spinner } from "../components/ui";
+import { formatDate, timeAgo, type Access, type ProRequest, type RequestStatus } from "../lib/api";
 import * as data from "../lib/adminData";
 import { signOut, useSession } from "../lib/session";
 
@@ -10,25 +10,22 @@ import { signOut, useSession } from "../lib/session";
 
 interface Stats {
   installs: number; active_1d: number; active_7d: number; active_30d: number; users: number;
-  trial: number; active: number; lifetime: number; expired: number; free: number;
-  trial_conversions: number; revenue_usd: number;
+  pro: number; requests: number; pending: number; approved: number; rejected: number; revoked: number;
   platforms: Record<string, number>; versions: Record<string, number>;
   new_installs_14d: { day: string; count: number }[];
 }
 
 interface UserRow {
-  user_id: string; email: string; signed_up_at: string; last_sign_in_at: string | null;
-  subscription_status: string | null; product_id: string | null; period_type: string | null;
-  store: string | null; environment: string | null; will_renew: boolean | null; billing_issue: boolean | null;
-  purchased_at: string | null; expires_at: string | null; had_trial: boolean | null;
-  converted_from_trial: boolean | null; revenue_usd: number; grant_id: string | null;
+  user_id: string; email: string; name: string | null; telegram: string | null; phone: string | null;
+  request_id: string | null; request_status: RequestStatus | null;
+  signed_up_at: string; last_sign_in_at: string | null; grant_id: string | null;
   grant_expires_at: string | null; grant_note: string | null; installs: number;
   last_seen: string | null; platforms: string | null; access: Access;
 }
 
 interface Grant {
   id: string; email: string; note: string | null; expires_at: string | null;
-  created_by: string; created_at: string; revoked_at: string | null;
+  created_by: string; created_at: string; revoked_at: string | null; request_id: string | null;
 }
 
 interface Install {
@@ -40,7 +37,7 @@ interface Device {
   token_hash: string; platform: string | null; created_at: string; last_seen: string; revoked_at: string | null;
 }
 
-type Tab = "overview" | "users" | "grants" | "installs" | "admins";
+type Tab = "overview" | "requests" | "users" | "grants" | "installs" | "admins";
 
 // ------------------------------------------------------------------ page
 
@@ -48,11 +45,20 @@ export function AdminPage() {
   const { user, loading } = useSession();
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [tab, setTab] = useState<Tab>("overview");
+  const [requests, setRequests] = useState<ProRequest[] | null>(null);
+  const [requestsError, setRequestsError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!user) return;
     data.isAdmin().then(setIsAdmin);
   }, [user]);
+
+  // Live: a press in the Telegram bot shows up here without reloading.
+  useEffect(() => {
+    if (!isAdmin) return;
+    return data.watchRequests((r) => { setRequests(r); setRequestsError(null); }, (e) => setRequestsError(e.message));
+  }, [isAdmin]);
+  const pending = requests?.filter((r) => r.status === "pending").length ?? 0;
 
   if (loading || (user && isAdmin === null)) {
     return <Centered><Spinner /></Centered>;
@@ -75,10 +81,11 @@ export function AdminPage() {
     );
   }
 
-  const tabs: { id: Tab; label: string; icon: ReactNode }[] = [
+  const tabs: { id: Tab; label: string; icon: ReactNode; badge?: number }[] = [
     { id: "overview", label: "Overview", icon: <IconChart /> },
+    { id: "requests", label: "Pro requests", icon: <IconInbox />, badge: pending },
     { id: "users", label: "Users", icon: <IconUsers /> },
-    { id: "grants", label: "Free access", icon: <IconGift /> },
+    { id: "grants", label: "Give Pro", icon: <IconGift /> },
     { id: "installs", label: "Installs", icon: <IconMonitor /> },
     { id: "admins", label: "Admins", icon: <IconShield /> },
   ];
@@ -97,6 +104,11 @@ export function AdminPage() {
               className={`flex shrink-0 items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition ${
                 tab === t.id ? "bg-white/10 text-white" : "text-slate-400 hover:bg-white/5 hover:text-slate-200"}`}>
               <span className="h-4 w-4">{t.icon}</span>{t.label}
+              {!!t.badge && (
+                <span className="ml-auto grid h-5 min-w-5 place-items-center rounded-full bg-amber-400/20 px-1.5 text-[11px] font-semibold text-amber-100 ring-1 ring-amber-300/30">
+                  {t.badge}
+                </span>
+              )}
             </button>
           ))}
         </nav>
@@ -106,7 +118,8 @@ export function AdminPage() {
         </div>
       </aside>
       <main className="min-w-0 flex-1 px-4 py-6 sm:px-8 lg:py-8">
-        {tab === "overview" && <Overview onOpenUsers={() => setTab("users")} />}
+        {tab === "overview" && <Overview onOpen={setTab} pendingLive={requests ? pending : null} />}
+        {tab === "requests" && <Requests rows={requests} error={requestsError} />}
         {tab === "users" && <Users />}
         {tab === "grants" && <Grants />}
         {tab === "installs" && <Installs />}
@@ -134,7 +147,7 @@ function PageTitle({ title, subtitle, action }: { title: string; subtitle?: stri
 
 // -------------------------------------------------------------- overview
 
-function Overview({ onOpenUsers }: { onOpenUsers: () => void }) {
+function Overview({ onOpen, pendingLive }: { onOpen: (t: Tab) => void; pendingLive: number | null }) {
   const [stats, setStats] = useState<Stats | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -143,25 +156,23 @@ function Overview({ onOpenUsers }: { onOpenUsers: () => void }) {
   if (error) return <Notice tone="error">{error}</Notice>;
   if (!stats) return <div className="grid place-items-center py-24"><Spinner /></div>;
 
-  const paying = stats.active + stats.lifetime;
   const maxDay = Math.max(1, ...stats.new_installs_14d.map((d) => d.count));
   const platformTotal = Object.values(stats.platforms).reduce((a, b) => a + b, 0) || 1;
 
   return (
     <>
-      <PageTitle title="Overview" subtitle="Who uses Winter and who pays for it." />
+      <PageTitle title="Overview" subtitle="Who uses Winter, who asked for Pro and who has it." />
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="Installs" value={stats.installs} hint={`${stats.active_7d} active this week`} />
         <Stat label="Active today" value={stats.active_1d} hint={`${stats.active_30d} in 30 days`} />
-        <Stat label="Accounts" value={stats.users} hint="signed in at least once" />
-        <Stat label="Revenue" value={`$${Number(stats.revenue_usd).toLocaleString(undefined, { maximumFractionDigits: 2 })}`} hint="USD, from RevenueCat events" />
+        <Stat label="Accounts" value={stats.users} hint="signed in at least once" onClick={() => onOpen("users")} />
+        <Stat label="Winter Pro" value={stats.pro} tone="sky" hint="emails with active Pro" onClick={() => onOpen("users")} />
       </div>
-      <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-5">
-        <Stat label="On free trial" value={stats.trial} tone="amber" onClick={onOpenUsers} />
-        <Stat label="Subscribed" value={stats.active} tone="emerald" onClick={onOpenUsers} />
-        <Stat label="Lifetime" value={stats.lifetime} tone="sky" onClick={onOpenUsers} />
-        <Stat label="Free access" value={stats.free} tone="violet" onClick={onOpenUsers} />
-        <Stat label="Trial → paid" value={stats.trial_conversions} hint={`${paying} paying now`} />
+      <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Stat label="Waiting for review" value={pendingLive ?? stats.pending} tone="amber" hint="Pro requests" onClick={() => onOpen("requests")} />
+        <Stat label="Approved" value={stats.approved} tone="emerald" onClick={() => onOpen("requests")} />
+        <Stat label="Rejected" value={stats.rejected} tone="rose" onClick={() => onOpen("requests")} />
+        <Stat label="Pro removed" value={stats.revoked} hint={`${stats.requests} requests in total`} onClick={() => onOpen("requests")} />
       </div>
 
       <div className="mt-6 grid gap-3 lg:grid-cols-3">
@@ -206,7 +217,7 @@ function Overview({ onOpenUsers }: { onOpenUsers: () => void }) {
 }
 
 const statTones = {
-  default: "text-white", amber: "text-amber-200", emerald: "text-emerald-200", sky: "text-sky-200", violet: "text-violet-200",
+  default: "text-white", amber: "text-amber-200", emerald: "text-emerald-200", sky: "text-sky-200", rose: "text-rose-200",
 };
 
 function Stat({ label, value, hint, tone = "default", onClick }: {
@@ -227,17 +238,16 @@ const platformName = (p: string | null) =>
 
 // ----------------------------------------------------------------- users
 
-const filters: { id: "all" | Access; label: string }[] = [
-  { id: "all", label: "All" }, { id: "trial", label: "Trial" }, { id: "active", label: "Subscribed" },
-  { id: "lifetime", label: "Lifetime" }, { id: "free", label: "Free" }, { id: "expired", label: "Expired" },
-  { id: "none", label: "No plan" },
+type UserFilter = "all" | Access | "pending";
+const filters: { id: UserFilter; label: string }[] = [
+  { id: "all", label: "All" }, { id: "pro", label: "Winter Pro" }, { id: "pending", label: "Waiting" }, { id: "none", label: "Free" },
 ];
 
 function Users() {
   const [rows, setRows] = useState<UserRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<"all" | Access>("all");
+  const [filter, setFilter] = useState<UserFilter>("all");
   const [selected, setSelected] = useState<UserRow | null>(null);
 
   const load = useCallback(async () => {
@@ -251,21 +261,20 @@ function Users() {
   }, []);
   useEffect(() => { load(); }, [load]);
 
-  const counts = useMemo(() => {
-    const c: Record<string, number> = { all: rows?.length ?? 0 };
-    rows?.forEach((r) => { c[r.access] = (c[r.access] ?? 0) + 1; });
-    c.expired = (c.expired ?? 0) + (c.refunded ?? 0);
-    return c;
-  }, [rows]);
+  const matches = (r: UserRow, f: UserFilter) =>
+    f === "all" || (f === "pending" ? r.request_status === "pending" : r.access === f);
+  const counts = useMemo(() => Object.fromEntries(filters.map((f) => [f.id, (rows ?? []).filter((r) => matches(r, f.id)).length])), [rows]);
 
-  const visible = useMemo(() => (rows ?? []).filter((r) =>
-    (filter === "all" || r.access === filter || (filter === "expired" && r.access === "refunded")) &&
-    (!query || r.email?.toLowerCase().includes(query.toLowerCase()))), [rows, filter, query]);
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return (rows ?? []).filter((r) => matches(r, filter) &&
+      (!q || [r.email, r.name, r.telegram, r.phone].some((v) => v?.toLowerCase().includes(q))));
+  }, [rows, filter, query]);
 
   return (
     <>
       <PageTitle title="Users" subtitle="Everyone who signed in to Winter." action={
-        <input className="input w-full sm:w-72" placeholder="Search email…" value={query} onChange={(e) => setQuery(e.target.value)} />} />
+        <input className="input w-full sm:w-72" placeholder="Search name, email, @telegram…" value={query} onChange={(e) => setQuery(e.target.value)} />} />
       <div className="mb-4 flex flex-wrap gap-1.5">
         {filters.map((f) => (
           <button key={f.id} onClick={() => setFilter(f.id)}
@@ -280,31 +289,29 @@ function Users() {
       {rows && (
         <div className="glass overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[820px] text-left text-sm">
+            <table className="w-full min-w-[860px] text-left text-sm">
               <thead className="border-b border-white/5 text-xs uppercase tracking-wider text-slate-500">
                 <tr>
                   <th className="px-5 py-3 font-medium">User</th>
                   <th className="px-3 py-3 font-medium">Access</th>
-                  <th className="px-3 py-3 font-medium">Plan</th>
-                  <th className="px-3 py-3 font-medium">Renews / ends</th>
+                  <th className="px-3 py-3 font-medium">Pro request</th>
+                  <th className="px-3 py-3 font-medium">Contact</th>
                   <th className="px-3 py-3 font-medium">Computers</th>
-                  <th className="px-3 py-3 font-medium">Last seen</th>
-                  <th className="px-5 py-3 text-right font-medium">Revenue</th>
+                  <th className="px-5 py-3 font-medium">Last seen</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-white/5">
                 {visible.map((r) => (
                   <tr key={r.user_id} onClick={() => setSelected(r)} className="cursor-pointer transition hover:bg-white/[0.04]">
                     <td className="px-5 py-3">
-                      <p className="font-medium text-slate-100">{r.email}</p>
-                      <p className="text-xs text-slate-500">Joined {formatDate(r.signed_up_at)}</p>
+                      <p className="font-medium text-slate-100">{r.name ?? r.email}</p>
+                      <p className="text-xs text-slate-500">{r.name ? `${r.email} · ` : ""}joined {formatDate(r.signed_up_at)}</p>
                     </td>
                     <td className="px-3 py-3"><AccessBadge access={r.access} /></td>
-                    <td className="px-3 py-3 text-slate-300">{planLabel(r)}</td>
-                    <td className="px-3 py-3 text-slate-400">{renewLabel(r)}</td>
+                    <td className="px-3 py-3">{r.request_status ? <RequestBadge status={r.request_status} /> : <span className="text-slate-500">—</span>}</td>
+                    <td className="px-3 py-3 text-slate-400" onClick={(e) => e.stopPropagation()}><Contact telegram={r.telegram} phone={r.phone} /></td>
                     <td className="px-3 py-3 text-slate-400">{r.installs > 0 ? `${r.installs} · ${(r.platforms ?? "").split(", ").map(platformName).join(", ")}` : "—"}</td>
-                    <td className="px-3 py-3 text-slate-400">{timeAgo(r.last_seen)}</td>
-                    <td className="px-5 py-3 text-right tabular-nums text-slate-300">{Number(r.revenue_usd) > 0 ? `$${Number(r.revenue_usd).toFixed(2)}` : "—"}</td>
+                    <td className="px-5 py-3 text-slate-400">{timeAgo(r.last_seen)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -318,19 +325,14 @@ function Users() {
   );
 }
 
-function planLabel(r: UserRow) {
-  if (r.access === "free") return "Free (admin)";
-  if (!r.product_id) return "—";
-  const name = { lifetime: "Lifetime", yearly: "Yearly", monthly: "Monthly" }[r.product_id] ?? r.product_id;
-  return r.environment === "SANDBOX" ? `${name} (sandbox)` : name;
-}
-
-function renewLabel(r: UserRow) {
-  if (r.access === "free") return r.grant_expires_at ? `Ends ${formatDate(r.grant_expires_at)}` : "Forever";
-  if (r.access === "lifetime") return "Never";
-  if (!r.expires_at) return "—";
-  const verb = r.access === "expired" || r.access === "refunded" ? "Ended" : r.will_renew === false ? "Ends" : "Renews";
-  return `${verb} ${formatDate(r.expires_at)}`;
+function Contact({ telegram, phone }: { telegram: string | null; phone: string | null }) {
+  if (!telegram && !phone) return <span className="text-slate-500">—</span>;
+  return (
+    <div className="flex flex-col gap-0.5 text-xs">
+      {telegram && <a href={`https://t.me/${telegram}`} target="_blank" rel="noreferrer" className="text-sky-300 hover:underline">@{telegram}</a>}
+      {phone && <a href={`tel:${phone.replace(/[^+0-9]/g, "")}`} className="text-slate-300 hover:underline">{phone}</a>}
+    </div>
+  );
 }
 
 function UserDrawer({ user, onClose, onChanged }: { user: UserRow; onClose: () => void; onChanged: () => void }) {
@@ -357,16 +359,14 @@ function UserDrawer({ user, onClose, onChanged }: { user: UserRow; onClose: () =
     }
   }
 
-  const refresh = () => run("refresh", async () => {
-    const r = await data.refreshUser(user.user_id);
-    if (!r.configured) throw new Error("REVENUECAT_SECRET_KEY isn't set on the server.");
-    if (!r.ok) throw new Error("RevenueCat request failed (see function logs).");
-    return "Synced with RevenueCat.";
-  });
-
   const revokeGrant = () => run("revoke", async () => {
     if (user.grant_id) await data.revokeGrant(user.grant_id);
-    return "Free access removed.";
+    return "Pro removed.";
+  });
+
+  const decide = (action: "approve" | "reject") => run(action, async () => {
+    if (user.request_id) await data.decideRequest(user.request_id, action);
+    return action === "approve" ? "Request approved — Pro is on." : "Request rejected.";
   });
 
   const signOutDevice = (hash: string) => run("device", async () => {
@@ -382,7 +382,8 @@ function UserDrawer({ user, onClose, onChanged }: { user: UserRow; onClose: () =
         <div className="mb-6 flex items-start justify-between gap-4">
           <div className="min-w-0">
             <p className="text-xs uppercase tracking-wider text-slate-500">User</p>
-            <h2 className="truncate text-xl font-semibold text-white">{user.email}</h2>
+            <h2 className="truncate text-xl font-semibold text-white">{user.name ?? user.email}</h2>
+            {user.name && <p className="truncate text-sm text-slate-400">{user.email}</p>}
             <p className="mt-1 font-mono text-[11px] text-slate-500">{user.user_id}</p>
           </div>
           <button onClick={onClose} className="btn-ghost !px-3 !py-1.5" aria-label="Close">✕</button>
@@ -392,28 +393,26 @@ function UserDrawer({ user, onClose, onChanged }: { user: UserRow; onClose: () =
 
         <section className="glass mb-4 p-5">
           <div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold text-white">Winter Pro</h3><AccessBadge access={user.access} /></div>
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
-            <Field label="Plan" value={planLabel(user)} />
-            <Field label="Renews / ends" value={renewLabel(user)} />
-            <Field label="Purchased" value={formatDate(user.purchased_at)} />
-            <Field label="Store" value={user.store ?? "—"} />
-            <Field label="Had trial" value={user.had_trial ? (user.converted_from_trial ? "Yes → converted" : "Yes") : "No"} />
-            <Field label="Revenue" value={Number(user.revenue_usd) > 0 ? `$${Number(user.revenue_usd).toFixed(2)}` : "—"} />
-            {user.billing_issue && <Field label="Billing" value={<span className="text-rose-300">Payment issue</span>} />}
-            {user.grant_note && <Field label="Grant note" value={user.grant_note} />}
+          <dl className="mb-4 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+            <Field label="Pro request" value={user.request_status ? <RequestBadge status={user.request_status} /> : "—"} />
+            <Field label="Contact" value={<Contact telegram={user.telegram} phone={user.phone} />} />
+            <Field label="Signed up" value={formatDate(user.signed_up_at)} />
+            <Field label="Last sign-in" value={formatDate(user.last_sign_in_at)} />
+            {user.grant_id && <Field label="Pro until" value={user.grant_expires_at ? formatDate(user.grant_expires_at) : "Forever"} />}
+            {user.grant_note && <Field label="Note" value={user.grant_note} />}
           </dl>
-          <button className="btn-ghost mt-4 w-full" onClick={refresh} disabled={busy !== null}>
-            {busy === "refresh" ? <Spinner className="h-4 w-4" /> : "Sync with RevenueCat"}
-          </button>
-        </section>
-
-        <section className="glass mb-4 p-5">
-          <h3 className="mb-3 text-sm font-semibold text-white">Free access</h3>
-          {user.grant_id ? (
-            <div className="flex items-center justify-between gap-3">
-              <p className="text-sm text-slate-300">{user.grant_expires_at ? `Until ${formatDate(user.grant_expires_at)}` : "Forever"}</p>
-              <button className="btn-danger !py-2" onClick={revokeGrant} disabled={busy !== null}>Remove</button>
+          {user.request_status === "pending" && !user.grant_id && (
+            <div className="mb-4 grid grid-cols-2 gap-2">
+              <button className="btn-primary" onClick={() => decide("approve")} disabled={busy !== null}>
+                {busy === "approve" ? <Spinner className="h-4 w-4" /> : "Approve request"}
+              </button>
+              <button className="btn-danger" onClick={() => decide("reject")} disabled={busy !== null}>Reject</button>
             </div>
+          )}
+          {user.grant_id ? (
+            <button className="btn-danger w-full" onClick={revokeGrant} disabled={busy !== null}>
+              {busy === "revoke" ? <Spinner className="h-4 w-4" /> : "Remove Pro"}
+            </button>
           ) : (
             <GrantForm email={user.email} compact onDone={(t) => { setMessage({ tone: "success", text: t }); onChanged(); }} />
           )}
@@ -481,7 +480,7 @@ function GrantForm({ email: initialEmail = "", compact = false, onDone }: { emai
     }
     setBusy(false);
     if (!compact) { setEmail(""); setNote(""); }
-    onDone(`${clean} now has free Winter Pro${expires ? ` until ${formatDate(expires)}` : " forever"}.`);
+    onDone(`${clean} now has Winter Pro${expires ? ` until ${formatDate(expires)}` : " forever"}.`);
   }
 
   return (
@@ -507,7 +506,7 @@ function GrantForm({ email: initialEmail = "", compact = false, onDone }: { emai
       {duration === "custom" && <input type="date" className="input" value={until} min={new Date().toISOString().slice(0, 10)} onChange={(e) => setUntil(e.target.value)} />}
       <input className="input" placeholder="Note (optional) — e.g. beta tester" value={note} onChange={(e) => setNote(e.target.value)} />
       {error && <Notice tone="error">{error}</Notice>}
-      <button className="btn-primary w-full" disabled={busy}>{busy ? <Spinner className="h-4 w-4" /> : "Give free Pro"}</button>
+      <button className="btn-primary w-full" disabled={busy}>{busy ? <Spinner className="h-4 w-4" /> : "Give Pro"}</button>
     </form>
   );
 }
@@ -529,16 +528,16 @@ function Grants() {
 
   return (
     <>
-      <PageTitle title="Free access" subtitle="Give Winter Pro to anyone by email — it works even before they sign up." />
+      <PageTitle title="Give Pro" subtitle="Give Winter Pro to anyone by email — it works even before they sign up." />
       <div className="grid gap-4 lg:grid-cols-[360px_1fr]">
         <section className="glass h-fit p-5">
-          <h3 className="mb-4 text-sm font-semibold text-white">Give free Pro</h3>
+          <h3 className="mb-4 text-sm font-semibold text-white">Give Pro by email</h3>
           {message && <div className="mb-3"><Notice tone="success">{message}</Notice></div>}
           <GrantForm onDone={(t) => { setMessage(t); load(); }} />
         </section>
         <section className="glass overflow-hidden">
           {!grants ? <div className="grid place-items-center py-16"><Spinner /></div> : grants.length === 0 ? (
-            <p className="px-5 py-12 text-center text-sm text-slate-500">No free access given yet.</p>
+            <p className="px-5 py-12 text-center text-sm text-slate-500">Nobody has Pro yet.</p>
           ) : (
             <ul className="divide-y divide-white/5">
               {grants.map((g) => (
@@ -548,6 +547,7 @@ function Grants() {
                     <p className="text-xs text-slate-500">
                       {g.expires_at ? `Until ${formatDate(g.expires_at)}` : "Forever"} · by {g.created_by} · {formatDate(g.created_at)}
                       {g.note && <> · <span className="text-slate-400">{g.note}</span></>}
+                      {g.request_id && <> · <span className="text-sky-300/80">from request</span></>}
                     </p>
                   </div>
                   {isActive(g) ? (
@@ -562,6 +562,165 @@ function Grants() {
         </section>
       </div>
     </>
+  );
+}
+
+// --------------------------------------------------------------- requests
+
+const requestFilters: { id: "all" | RequestStatus; label: string }[] = [
+  { id: "pending", label: "Waiting" }, { id: "approved", label: "Approved" }, { id: "rejected", label: "Rejected" },
+  { id: "revoked", label: "Pro removed" }, { id: "all", label: "All" },
+];
+
+function Requests({ rows, error }: { rows: ProRequest[] | null; error: string | null }) {
+  const [filter, setFilter] = useState<"all" | RequestStatus>("pending");
+  const [busy, setBusy] = useState<string | null>(null);
+  const [message, setMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
+  const counts = useMemo(() => {
+    const c: Record<string, number> = { all: rows?.length ?? 0 };
+    rows?.forEach((r) => { c[r.status] = (c[r.status] ?? 0) + 1; });
+    return c;
+  }, [rows]);
+  const visible = (rows ?? []).filter((r) => filter === "all" || r.status === filter);
+
+  async function decide(r: ProRequest, action: "approve" | "reject" | "revoke") {
+    setBusy(`${r.id}:${action}`);
+    setMessage(null);
+    try {
+      const res = await data.decideRequest(r.id, action);
+      setMessage(res.changed
+        ? { tone: "success", text: `${r.email}: ${action === "approve" ? "Pro is on" : action === "reject" ? "rejected" : "Pro removed"}. The bot message was updated.` }
+        : { tone: "error", text: `${r.email} was already changed (maybe in Telegram).` });
+    } catch (e) {
+      setMessage({ tone: "error", text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <>
+      <PageTitle title="Pro requests" subtitle="Approve here or in the Telegram bot — both stay in sync, live." />
+      <TelegramCard />
+      <div className="mb-4 mt-6 flex flex-wrap gap-1.5">
+        {requestFilters.map((f) => (
+          <button key={f.id} onClick={() => setFilter(f.id)}
+            className={`rounded-full px-3 py-1.5 text-xs font-medium ring-1 transition ${
+              filter === f.id ? "bg-sky-300/15 text-sky-100 ring-sky-200/40" : "bg-white/[0.03] text-slate-400 ring-white/10 hover:text-slate-200"}`}>
+            {f.label} <span className="ml-1 text-slate-500">{counts[f.id] ?? 0}</span>
+          </button>
+        ))}
+      </div>
+      {message && <div className="mb-4"><Notice tone={message.tone}>{message.text}</Notice></div>}
+      {error && <Notice tone="error">{error}</Notice>}
+      {!rows && !error && <div className="grid place-items-center py-24"><Spinner /></div>}
+      {rows && visible.length === 0 && (
+        <div className="glass px-5 py-14 text-center text-sm text-slate-500">
+          {filter === "pending" ? "No requests waiting. 🎉" : "Nothing here."}
+        </div>
+      )}
+      <div className="grid gap-3 xl:grid-cols-2">
+        {visible.map((r) => (
+          <article key={r.id} className={`glass p-5 transition ${r.status === "pending" ? "ring-1 ring-amber-300/20" : ""}`}>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="truncate text-base font-semibold text-white">{r.name}</h3>
+                <p className="truncate text-sm text-slate-400">{r.email}</p>
+              </div>
+              <RequestBadge status={r.status} />
+            </div>
+            <div className="mt-4 flex flex-wrap gap-2 text-xs">
+              {r.telegram && (
+                <a href={`https://t.me/${r.telegram}`} target="_blank" rel="noreferrer"
+                  className="rounded-lg bg-sky-400/10 px-2.5 py-1.5 text-sky-200 ring-1 ring-sky-300/20 hover:bg-sky-400/20">✈ @{r.telegram}</a>
+              )}
+              {r.phone && (
+                <a href={`tel:${r.phone.replace(/[^+0-9]/g, "")}`}
+                  className="rounded-lg bg-white/5 px-2.5 py-1.5 text-slate-200 ring-1 ring-white/10 hover:bg-white/10">☎ {r.phone}</a>
+              )}
+              {!r.telegram && !r.phone && <span className="text-slate-500">No contact besides email</span>}
+            </div>
+            <p className="mt-4 text-xs text-slate-500">
+              Requested {formatDate(r.created_at, true)}
+              {r.status !== "pending" && r.decided_by && <> · {decidedLabel(r.status)} by <span className="text-slate-400">{r.decided_by}</span> {timeAgo(r.decided_at)}</>}
+            </p>
+            <div className="mt-4 flex gap-2">
+              {r.status === "pending" && (
+                <>
+                  <button className="btn-primary flex-1" disabled={busy !== null} onClick={() => decide(r, "approve")}>
+                    {busy === `${r.id}:approve` ? <Spinner className="h-4 w-4" /> : "✓ Approve"}
+                  </button>
+                  <button className="btn-danger flex-1" disabled={busy !== null} onClick={() => decide(r, "reject")}>
+                    {busy === `${r.id}:reject` ? <Spinner className="h-4 w-4" /> : "Reject"}
+                  </button>
+                </>
+              )}
+              {r.status === "approved" && (
+                <button className="btn-danger flex-1" disabled={busy !== null} onClick={() => decide(r, "revoke")}>
+                  {busy === `${r.id}:revoke` ? <Spinner className="h-4 w-4" /> : "Remove Pro"}
+                </button>
+              )}
+              {(r.status === "rejected" || r.status === "revoked") && (
+                <button className="btn-ghost flex-1" disabled={busy !== null} onClick={() => decide(r, "approve")}>
+                  {busy === `${r.id}:approve` ? <Spinner className="h-4 w-4" /> : "Approve anyway"}
+                </button>
+              )}
+            </div>
+          </article>
+        ))}
+      </div>
+    </>
+  );
+}
+
+const decidedLabel = (s: RequestStatus) => (s === "approved" ? "approved" : s === "rejected" ? "rejected" : "Pro removed");
+
+function TelegramCard() {
+  const [status, setStatus] = useState<data.TelegramStatus | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    data.telegramStatus().then((s) => { setStatus(s); setError(null); }).catch((e) => setError(String(e)));
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  async function connect() {
+    setBusy(true);
+    try {
+      await data.telegramConnect();
+      load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const connected = !!status?.webhookUrl && status.webhookUrl === status.expectedUrl;
+  return (
+    <section className="glass flex flex-wrap items-center justify-between gap-4 p-5">
+      <div className="flex min-w-0 items-center gap-4">
+        <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl bg-sky-400/15 text-sky-200 ring-1 ring-sky-300/30"><IconSend /></span>
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-white">
+            Telegram bot {status?.bot && <a href={`https://t.me/${status.bot.username}`} target="_blank" rel="noreferrer" className="font-normal text-sky-300 hover:underline">@{status.bot.username}</a>}
+          </p>
+          <p className="truncate text-xs text-slate-400">
+            {!status && !error && "Checking…"}
+            {error && <span className="text-rose-300">{error}</span>}
+            {status && !status.configured && "Not set up: TELEGRAM_BOT_TOKEN secret and TELEGRAM_CHAT_ID are needed (see docs/MONETIZATION.md)."}
+            {status?.configured && !status.bot && "The bot token was rejected by Telegram."}
+            {status?.configured && status.bot && (connected
+              ? <>New users and requests go to chat <span className="font-mono">{status.chatId}</span>; buttons work.</>
+              : "Notifications work. Connect to make the bot's buttons work.")}
+            {status?.lastError && <span className="ml-1 text-amber-300">· last error: {status.lastError}</span>}
+          </p>
+        </div>
+      </div>
+      {status?.configured && status.bot && (connected
+        ? <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-400/15 px-2.5 py-1 text-xs font-medium text-emerald-200 ring-1 ring-emerald-300/30"><span className="h-1.5 w-1.5 rounded-full bg-current" />Connected</span>
+        : <button className="btn-primary" onClick={connect} disabled={busy}>{busy ? <Spinner className="h-4 w-4" /> : "Connect buttons"}</button>)}
+    </section>
   );
 }
 
@@ -679,4 +838,6 @@ const IconChart = svg("M4 20V10M10 20V4M16 20v-7M22 20H2");
 const IconUsers = svg("M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8");
 const IconGift = svg("M20 12v10H4V12M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z");
 const IconMonitor = svg("M2 3h20v14H2zM8 21h8M12 17v4");
+const IconInbox = svg("M22 12h-6l-2 3h-4l-2-3H2M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.7 4H7.3a2 2 0 0 0-1.8 1.1z");
+const IconSend = svg("M22 2 11 13M22 2l-7 20-4-9-9-4z");
 const IconShield = svg("M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z");

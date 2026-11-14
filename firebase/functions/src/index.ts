@@ -8,51 +8,42 @@
 //     POST /status         {token?}                   -> access summary
 //     POST /signout        {token}
 //   Web portal (Authorization: Bearer <Firebase ID token>):
+//     POST /hello                          registers the user (+ Telegram notice once)
 //     POST /link/approve   {code}
-//     POST /account        {refresh?}
+//     POST /account
+//     POST /pro/request    {name, telegram?, phone?}
 //     POST /devices/revoke {tokenHash}
-//     POST /admin/refresh  {userId}       (admins)
-//     POST /admin/users                   (admins) -> rows for the Users table
-//     POST /admin/stats                   (admins) -> dashboard numbers
-// `revenuecatWebhook` — RevenueCat -> Firestore `subscriptions`.
+//     POST /admin/requests/decide {id, action: approve|reject|revoke}  (admins)
+//     POST /admin/telegram/status | /admin/telegram/connect          (admins)
+//     POST /admin/users | /admin/stats                                (admins)
+// `telegramWebhook` — inline buttons of the admin bot.
+// `onGrantUpdated` — a request's grant revoked in the panel -> request + bot message.
 import type { Request } from "firebase-functions/v2/https";
 import { onRequest } from "firebase-functions/v2/https";
 import { setGlobalOptions } from "firebase-functions/v2/options";
-import { defineSecret, defineString } from "firebase-functions/params";
+import { defineString } from "firebase-functions/params";
 import type { Response } from "express";
 import type { DecodedIdToken } from "firebase-admin/auth";
+import { onDocumentUpdated } from "firebase-functions/v2/firestore";
 import {
-  accessFor, auth, db, effectiveStatus, ENTITLEMENT, FieldValue, isUid, iso, randomToken,
-  refreshFromRevenueCat, safeEqual, sha256, Timestamp, ts, type SubscriptionDoc,
+  accessFor, auth, db, FieldValue, iso, latestRequest, randomToken, safeEqual, sha256, Timestamp,
 } from "./pro";
+import {
+  announceNewUser, announceRequest, botConfigured, decideRequest, syncRevokedGrant, tg,
+  TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_WEBHOOK_SECRET, webhookSecret, type Decision,
+} from "./telegram";
 
 setGlobalOptions({ region: "europe-west1", maxInstances: 10 });
 
-const REVENUECAT_SECRET_KEY = defineSecret("REVENUECAT_SECRET_KEY");
-const REVENUECAT_WEBHOOK_AUTH = defineSecret("REVENUECAT_WEBHOOK_AUTH");
 const PORTAL_URL = defineString("PORTAL_URL", { default: "http://localhost:5173" });
-const PURCHASE_LINK = defineString("REVENUECAT_PURCHASE_LINK", { default: "" });
 
 const LINK_TTL_MS = 15 * 60 * 1000;
 type Body = Record<string, unknown>;
 const str = (v: unknown, max = 200) => (typeof v === "string" ? v.slice(0, max) : undefined);
 const portal = (path: string) => `${PORTAL_URL.value().replace(/\/+$/, "")}${path}`;
-const rcKey = () => {
-  try {
-    return REVENUECAT_SECRET_KEY.value() === "unset" ? "" : REVENUECAT_SECRET_KEY.value();
-  } catch {
-    return "";
-  }
-};
 
 class HttpError extends Error {
   constructor(public status: number, message: string) { super(message); }
-}
-
-function upgradeUrl(uid: string | null, email: string | null) {
-  const link = PURCHASE_LINK.value().replace(/\/+$/, "");
-  if (link && uid) return `${link}/${encodeURIComponent(uid)}${email ? `?email=${encodeURIComponent(email)}` : ""}`;
-  return portal("/upgrade");
 }
 
 async function deviceFor(token: unknown) {
@@ -95,11 +86,11 @@ async function requireAdmin(req: Request) {
   return user;
 }
 
-async function summary(uid: string, email: string | null, force = false) {
+async function summary(uid: string, email: string | null) {
   return {
     signedIn: true, email, userId: uid,
-    ...(await accessFor(uid, email, rcKey(), force)),
-    upgradeUrl: upgradeUrl(uid, email),
+    ...(await accessFor(email)),
+    upgradeUrl: portal("/upgrade"),
     accountUrl: portal("/account"),
     checkedAt: new Date().toISOString(),
   };
@@ -203,13 +194,15 @@ const routes: Record<string, (b: Body, req: Request) => Promise<unknown>> = {
     return { ok: true };
   },
 
-  async "/account"(b, req) {
+  async "/account"(_b, req) {
     const user = await sessionUser(req);
-    const info = await summary(user.uid, user.email ?? null, b.refresh === true);
+    const info = await summary(user.uid, user.email ?? null);
+    const r = await latestRequest(user.email);
     const devices = await db.collection("devices").where("userId", "==", user.uid).where("revokedAt", "==", null).get();
     return {
       ...info,
       isAdmin: await isAdmin(user.email),
+      request: r ? requestRow(r) : null,
       devices: devices.docs.map((d) => ({
         token_hash: d.id, platform: d.get("platform") ?? null,
         created_at: iso(d.get("createdAt")), last_seen: iso(d.get("lastSeen")),
@@ -227,12 +220,79 @@ const routes: Record<string, (b: Body, req: Request) => Promise<unknown>> = {
     return { ok: true };
   },
 
-  async "/admin/refresh"(b, req) {
+  async "/hello"(_b, req) {
+    const user = await sessionUser(req);
+    const ref = db.collection("users").doc(user.uid);
+    const created = await db.runTransaction(async (t) => {
+      if ((await t.get(ref)).exists) return false;
+      t.set(ref, { email: user.email!.toLowerCase(), name: user.name ?? null, createdAt: Timestamp.now() });
+      return true;
+    });
+    if (created) await announceNewUser(user.email!, user.name ?? null);
+    return { ok: true, created };
+  },
+
+  async "/pro/request"(b, req) {
+    const user = await sessionUser(req);
+    const email = user.email!.toLowerCase();
+    const name = str(b.name, 200)?.trim() ?? "";
+    if (name.length < 2 || name.length > 80) throw new HttpError(400, "name");
+    const telegram = str(b.telegram, 60)?.trim() ?? "";
+    if (telegram && !/^@?[A-Za-z0-9_]{4,32}$/.test(telegram)) throw new HttpError(400, "telegram");
+    const phone = str(b.phone, 40)?.trim() ?? "";
+    if (phone && !/^\+?[0-9 ()-]{7,20}$/.test(phone)) throw new HttpError(400, "phone");
+    if ((await accessFor(email)).pro) throw new HttpError(409, "already-pro");
+    const prev = await latestRequest(email);
+    if (prev?.get("status") === "pending") throw new HttpError(409, "pending");
+    const ref = await db.collection("proRequests").add({
+      userId: user.uid, email, name,
+      telegram: telegram ? telegram.replace(/^@/, "") : null,
+      phone: phone || null,
+      status: "pending", createdAt: Timestamp.now(), decidedAt: null, decidedBy: null, grantId: null,
+    });
+    await announceRequest(ref.id);
+    return { ok: true, request: requestRow(await ref.get()) };
+  },
+
+  async "/admin/requests/decide"(b, req) {
+    const admin = await requireAdmin(req);
+    const id = str(b.id, 64);
+    const action = str(b.action, 10) as Decision | undefined;
+    if (!id) throw new HttpError(400, "id");
+    if (action !== "approve" && action !== "reject" && action !== "revoke") throw new HttpError(400, "action");
+    try {
+      return await decideRequest(id, action, admin.email!.toLowerCase());
+    } catch (e) {
+      if (e instanceof Error && e.message === "not-found") throw new HttpError(404, "not-found");
+      throw e;
+    }
+  },
+
+  async "/admin/telegram/status"(_b, req) {
     await requireAdmin(req);
-    if (!isUid(b.userId)) throw new HttpError(400, "userId");
-    const key = rcKey();
-    const row = await refreshFromRevenueCat(b.userId, key);
-    return { ok: row !== null, configured: Boolean(key) };
+    const [me, hook] = await Promise.all([tg("getMe", {}), tg("getWebhookInfo", {})]);
+    return {
+      configured: botConfigured(),
+      chatId: TELEGRAM_CHAT_ID.value() || null,
+      bot: me ? { username: me.username, name: me.first_name } : null,
+      webhookUrl: hook?.url || null,
+      expectedUrl: telegramHookUrl(),
+      pending: hook?.pending_update_count ?? 0,
+      lastError: hook?.last_error_message ?? null,
+    };
+  },
+
+  async "/admin/telegram/connect"(_b, req) {
+    await requireAdmin(req);
+    const secret = webhookSecret();
+    if (!botConfigured() || !secret) throw new HttpError(412, "bot-not-configured");
+    const ok = await tg("setWebhook", {
+      url: telegramHookUrl(), secret_token: secret,
+      allowed_updates: ["callback_query", "message"], drop_pending_updates: false,
+    });
+    if (!ok) throw new HttpError(502, "telegram");
+    await tg("setMyCommands", { commands: [{ command: "id", description: "Chat ID" }] });
+    return { ok: true };
   },
 
   async "/admin/users"(_b, req) {
@@ -248,6 +308,26 @@ const routes: Record<string, (b: Body, req: Request) => Promise<unknown>> = {
 
 // ------------------------------------------------------------- admin data
 
+function requestRow(d: FirebaseFirestore.DocumentSnapshot) {
+  return {
+    id: d.id,
+    status: d.get("status") as string,
+    name: d.get("name") as string,
+    email: d.get("email") as string,
+    telegram: (d.get("telegram") as string | null) ?? null,
+    phone: (d.get("phone") as string | null) ?? null,
+    created_at: iso(d.get("createdAt")),
+    decided_at: iso(d.get("decidedAt")),
+    decided_by: (d.get("decidedBy") as string | null) ?? null,
+  };
+}
+
+/// Where Telegram posts button presses (Cloud Functions v2 keeps this URL).
+function telegramHookUrl() {
+  const project = process.env.GCLOUD_PROJECT ?? JSON.parse(process.env.FIREBASE_CONFIG ?? "{}").projectId;
+  return `https://europe-west1-${project}.cloudfunctions.net/telegramWebhook`;
+}
+
 async function listAllUsers() {
   const users = [];
   let page: string | undefined;
@@ -260,13 +340,12 @@ async function listAllUsers() {
 }
 
 async function adminUsers() {
-  const [users, subs, grants, installs] = await Promise.all([
+  const [users, grants, installs, requests] = await Promise.all([
     listAllUsers(),
-    db.collection("subscriptions").get(),
     db.collection("grants").where("revokedAt", "==", null).get(),
     db.collection("installs").get(),
+    db.collection("proRequests").get(),
   ]);
-  const subOf = new Map(subs.docs.map((d) => [d.id, d.data() as SubscriptionDoc]));
   const now = Date.now();
   const grantOf = new Map<string, FirebaseFirestore.DocumentData & { id: string }>();
   for (const g of grants.docs) {
@@ -275,6 +354,13 @@ async function adminUsers() {
     const prev = grantOf.get(g.get("email"));
     if (!prev || !exp || (prev.expiresAt && prev.expiresAt.toMillis() < exp.toMillis())) {
       grantOf.set(g.get("email"), { id: g.id, ...g.data() });
+    }
+  }
+  const requestOf = new Map<string, FirebaseFirestore.QueryDocumentSnapshot>();
+  for (const r of requests.docs) {
+    const prev = requestOf.get(r.get("email"));
+    if (!prev || (prev.get("createdAt") as Timestamp).toMillis() < (r.get("createdAt") as Timestamp).toMillis()) {
+      requestOf.set(r.get("email"), r);
     }
   }
   const installsOf = new Map<string, { count: number; lastSeen: number; platforms: Set<string> }>();
@@ -288,49 +374,41 @@ async function adminUsers() {
     installsOf.set(uid, e);
   }
   return users.map((u) => {
-    const s = subOf.get(u.uid);
-    const g = u.email ? grantOf.get(u.email.toLowerCase()) : undefined;
+    const email = (u.email ?? "").toLowerCase();
+    const g = email ? grantOf.get(email) : undefined;
+    const r = email ? requestOf.get(email) : undefined;
     const ins = installsOf.get(u.uid);
-    const status = effectiveStatus(s);
     return {
       user_id: u.uid,
       email: u.email ?? "",
+      name: (r?.get("name") as string | undefined) ?? u.displayName ?? null,
+      telegram: (r?.get("telegram") as string | null | undefined) ?? null,
+      phone: (r?.get("phone") as string | null | undefined) ?? null,
+      request_id: r?.id ?? null,
+      request_status: (r?.get("status") as string | undefined) ?? null,
       signed_up_at: new Date(u.metadata.creationTime).toISOString(),
       last_sign_in_at: u.metadata.lastSignInTime ? new Date(u.metadata.lastSignInTime).toISOString() : null,
-      subscription_status: s ? status : null,
-      product_id: s?.productId ?? null,
-      period_type: s?.periodType ?? null,
-      store: s?.store ?? null,
-      environment: s?.environment ?? null,
-      will_renew: s?.willRenew ?? null,
-      billing_issue: s?.billingIssue ?? null,
-      purchased_at: iso(s?.purchasedAt),
-      expires_at: iso(s?.expiresAt),
-      had_trial: s?.hadTrial ?? false,
-      converted_from_trial: s?.convertedFromTrial ?? false,
-      revenue_usd: s?.revenueUsd ?? 0,
       grant_id: g?.id ?? null,
       grant_expires_at: iso(g?.expiresAt),
       grant_note: g?.note ?? null,
       installs: ins?.count ?? 0,
       last_seen: ins?.lastSeen ? new Date(ins.lastSeen).toISOString() : null,
       platforms: ins ? [...ins.platforms].sort().join(", ") : null,
-      access: g ? "free" : status,
+      access: g ? "pro" : "none",
     };
   }).sort((a, b) => b.signed_up_at.localeCompare(a.signed_up_at));
 }
 
 async function adminStats() {
-  const [installs, subs, grants, users] = await Promise.all([
+  const [installs, grants, users, requests] = await Promise.all([
     db.collection("installs").get(),
-    db.collection("subscriptions").get(),
     db.collection("grants").where("revokedAt", "==", null).get(),
     listAllUsers(),
+    db.collection("proRequests").get(),
   ]);
   const now = Date.now(), day = 86400000;
   const seen = (d: FirebaseFirestore.QueryDocumentSnapshot, f: string) => (d.get(f) as Timestamp | null)?.toMillis() ?? 0;
   const count = (ms: number) => installs.docs.filter((d) => seen(d, "lastSeen") > now - ms).length;
-  const statuses = subs.docs.map((d) => effectiveStatus(d.data() as SubscriptionDoc));
   const platforms: Record<string, number> = {};
   const versions: Record<string, number> = {};
   for (const d of installs.docs) {
@@ -345,19 +423,17 @@ async function adminStats() {
       count: installs.docs.filter((d) => { const t = seen(d, "firstSeen"); return t >= start && t < start + day; }).length,
     };
   });
-  const freeEmails = new Set(grants.docs
+  const proEmails = new Set(grants.docs
     .filter((g) => !g.get("expiresAt") || (g.get("expiresAt") as Timestamp).toMillis() > now).map((g) => g.get("email")));
+  const byStatus = (s: string) => requests.docs.filter((r) => r.get("status") === s).length;
   return {
     installs: installs.size,
     active_1d: count(day), active_7d: count(7 * day), active_30d: count(30 * day),
     users: users.length,
-    trial: statuses.filter((s) => s === "trial").length,
-    active: statuses.filter((s) => s === "active").length,
-    lifetime: statuses.filter((s) => s === "lifetime").length,
-    expired: statuses.filter((s) => s === "expired" || s === "refunded").length,
-    free: freeEmails.size,
-    trial_conversions: subs.docs.filter((d) => d.get("convertedFromTrial")).length,
-    revenue_usd: Math.round(subs.docs.reduce((a, d) => a + (d.get("revenueUsd") ?? 0), 0) * 100) / 100,
+    pro: proEmails.size,
+    requests: requests.size,
+    pending: byStatus("pending"), approved: byStatus("approved"),
+    rejected: byStatus("rejected"), revoked: byStatus("revoked"),
     platforms, versions, new_installs_14d: days,
   };
 }
@@ -370,7 +446,7 @@ function cors(res: Response) {
   res.set("Access-Control-Allow-Methods", "POST, OPTIONS");
 }
 
-export const app = onRequest({ secrets: [REVENUECAT_SECRET_KEY], cors: false }, async (req, res) => {
+export const app = onRequest({ secrets: [TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET], cors: false }, async (req, res) => {
   cors(res);
   if (req.method === "OPTIONS") { res.status(204).send(""); return; }
   if (req.method !== "POST") { res.status(405).json({ error: "method" }); return; }
@@ -385,78 +461,61 @@ export const app = onRequest({ secrets: [REVENUECAT_SECRET_KEY], cors: false }, 
   }
 });
 
-// ------------------------------------------------------------- webhook
+// ------------------------------------------------------------- Telegram
 
-const GRANTING = new Set(["INITIAL_PURCHASE", "RENEWAL", "UNCANCELLATION", "PRODUCT_CHANGE",
-  "SUBSCRIPTION_EXTENDED", "NON_RENEWING_PURCHASE"]);
-const PAID = new Set(["INITIAL_PURCHASE", "RENEWAL", "NON_RENEWING_PURCHASE", "CANCELLATION"]);
-
-/// RevenueCat -> Integrations -> Webhooks. URL = this function's URL,
-/// Authorization header = the REVENUECAT_WEBHOOK_AUTH secret.
-export const revenuecatWebhook = onRequest(
-  { secrets: [REVENUECAT_SECRET_KEY, REVENUECAT_WEBHOOK_AUTH] },
+/// Bot webhook (set from the admin panel: Telegram -> Connect). Telegram
+/// sends the secret in X-Telegram-Bot-Api-Secret-Token. Always answers 200
+/// so Telegram doesn't retry a bad update forever.
+export const telegramWebhook = onRequest(
+  { secrets: [TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET] },
   async (req, res) => {
-    if (req.method !== "POST") { res.status(405).json({ error: "method" }); return; }
-    const secret = REVENUECAT_WEBHOOK_AUTH.value();
-    const header = req.headers.authorization ?? "";
-    if (!secret || !(safeEqual(header, secret) || safeEqual(header, `Bearer ${secret}`))) {
-      res.status(401).json({ error: "unauthorized" }); return;
-    }
-    const e = req.body?.event;
-    if (!e?.id || !e?.type) { res.status(400).json({ error: "event" }); return; }
-    const uid: string | undefined = [e.app_user_id, e.original_app_user_id, ...(e.aliases ?? [])].find(isUid);
-
+    const secret = webhookSecret();
+    const header = String(req.headers["x-telegram-bot-api-secret-token"] ?? "");
+    if (!secret || !safeEqual(header, secret)) { res.status(401).json({ error: "unauthorized" }); return; }
+    const u = req.body ?? {};
     try {
-      await db.collection("revenuecatEvents").doc(String(e.id)).create({
-        type: e.type, appUserId: uid ?? e.app_user_id ?? null, payload: req.body, receivedAt: Timestamp.now(),
-      });
-    } catch (err: any) {
-      if (err?.code === 6) { res.json({ ok: true, duplicate: true }); return; } // ALREADY_EXISTS: retried delivery
-      console.error("store event", err);
-      res.status(500).json({ error: "store" }); return; // RevenueCat retries
-    }
-    const ents: string[] | null = e.entitlement_ids ?? (e.entitlement_id ? [e.entitlement_id] : null);
-    if (e.type === "TEST" || !uid || (ents && !ents.includes(ENTITLEMENT))) {
-      res.json({ ok: true, ignored: true }); return;
-    }
-
-    const ref = db.collection("subscriptions").doc(uid);
-    await db.runTransaction(async (t) => {
-      const cur = ((await t.get(ref)).data() ?? { status: "none" }) as SubscriptionDoc;
-      const d: SubscriptionDoc = { revenueUsd: 0, hadTrial: false, convertedFromTrial: false, billingIssue: false, ...cur };
-      const period = typeof e.period_type === "string" ? e.period_type.toUpperCase() : null;
-      if (GRANTING.has(e.type)) {
-        const expires = ts(e.expiration_at_ms);
-        d.status = expires === null ? "lifetime" : period === "TRIAL" ? "trial" : "active";
-        d.productId = e.new_product_id ?? e.product_id ?? d.productId ?? null;
-        d.periodType = period;
-        d.purchasedAt = ts(e.purchased_at_ms) ?? d.purchasedAt ?? null;
-        d.expiresAt = expires;
-        d.willRenew = expires !== null;
-        d.billingIssue = false;
-      } else if (e.type === "CANCELLATION") {
-        d.willRenew = false;
-        if (e.cancel_reason === "CUSTOMER_SUPPORT") d.status = "refunded";
-      } else if (e.type === "EXPIRATION") {
-        d.status = "expired";
-        d.willRenew = false;
-      } else if (e.type === "BILLING_ISSUE") {
-        d.billingIssue = true;
+      if (u.message?.text && /^\/(start|id)\b/.test(u.message.text)) {
+        await tg("sendMessage", {
+          chat_id: u.message.chat.id,
+          text: `Chat ID: <code>${u.message.chat.id}</code>`,
+          parse_mode: "HTML",
+        });
       }
-      if (e.store) d.store = e.store;
-      if (e.environment) d.environment = e.environment;
-      if (period === "TRIAL") d.hadTrial = true;
-      if (e.is_trial_conversion === true) d.convertedFromTrial = true;
-      if (PAID.has(e.type) && typeof e.price === "number" && e.price !== 0) {
-        d.revenueUsd = Math.round(((d.revenueUsd ?? 0) + e.price) * 100) / 100;
+      const q = u.callback_query;
+      if (q) {
+        const chat = String(q.message?.chat?.id ?? "");
+        const m = /^req:([A-Za-z0-9]{1,64}):(approve|reject|revoke)$/.exec(q.data ?? "");
+        if (!m || chat !== TELEGRAM_CHAT_ID.value()) {
+          await tg("answerCallbackQuery", { callback_query_id: q.id, text: "Ruxsat yo'q" });
+        } else {
+          const actor = q.from?.username ? `telegram:@${q.from.username}` : `telegram:${q.from?.id ?? "?"}`;
+          let text: string;
+          try {
+            const r = await decideRequest(m[1], m[2] as Decision, actor);
+            text = !r.changed ? "Holat allaqachon o'zgargan"
+              : r.status === "approved" ? "✅ Pro berildi"
+                : r.status === "rejected" ? "❌ Rad etildi" : "🚫 Pro bekor qilindi";
+          } catch {
+            text = "So'rov topilmadi";
+          }
+          await tg("answerCallbackQuery", { callback_query_id: q.id, text });
+        }
       }
-      d.lastEvent = e.type;
-      d.updatedAt = Timestamp.now();
-      t.set(ref, d);
-    });
-    // The RevenueCat API is the source of truth for the current state.
-    await refreshFromRevenueCat(uid, rcKey());
+    } catch (e) {
+      console.error("telegramWebhook", e);
+    }
     res.json({ ok: true });
   },
 );
 
+/// A grant that came from a request was revoked in the admin panel (Free
+/// access tab / user drawer): mark the request revoked, update the bot.
+export const onGrantUpdated = onDocumentUpdated(
+  { document: "grants/{id}", secrets: [TELEGRAM_BOT_TOKEN] },
+  async (event) => {
+    const before = event.data?.before.data();
+    const after = event.data?.after.data();
+    if (!before || !after || before.revokedAt || !after.revokedAt) return;
+    await syncRevokedGrant(after);
+  },
+);

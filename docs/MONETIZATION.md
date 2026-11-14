@@ -1,34 +1,39 @@
-# Winter Pro: accounts, payments and the admin panel
+# Winter Pro: accounts, Pro requests, Telegram bot and the admin panel
 
 ```
- Winter app (Mac/Win)          Web portal (portal/, Firebase Hosting)     RevenueCat
- ───────────────────           ──────────────────────────────────────     ──────────
- ❄ menu: Sign In… ──opens──▶  /link?code=…  Google or email-link sign-in
-                               approves the code
+ Winter app (Mac/Win)          Web portal (portal/, Firebase Hosting)      Telegram bot (admin chat)
+ ───────────────────           ──────────────────────────────────────      ─────────────────────────
+ ❄ menu: Sign In… ──opens──▶  /link?code=…  Google or email-link sign-in ──▶ 👋 new user
  polls /link/poll ◀── device token
- ❄ menu: Get Winter Pro… ───▶ /upgrade  RevenueCat Web Paywall ─────────▶ checkout (card,
-                                         (Monthly/Yearly/Lifetime)         Apple Pay, Google Pay)
-                               /account  status, computers,
-                                         Manage subscription ───────────▶ customer portal
- /status every 30 min                                                          │ webhook
-        │                                                                      ▼
-        └──────────▶ Cloud Functions `app`, `revenuecatWebhook` + Firestore
-                     /admin (portal/) reads it: users, trials, buyers, free access
+ ❄ menu: Get Winter Pro… ───▶ /upgrade  form: name*, email* (= the        ──▶ ❄️ Pro request
+                                         account), Telegram, phone            [✅ Tasdiqlash] [❌ Rad etish]
+                               /admin   Pro requests (live), Users,        ◀─▶ same buttons, same state
+                                         Give Pro, Installs, Admins
+ /status every 30 min ◀────── Cloud Functions `app`, `telegramWebhook`, `onGrantUpdated` + Firestore
 ```
 
-Why the web and not the in-app SDK: RevenueCat's Paywall and Customer Center UI
-(`purchases_ui_flutter`) support iOS/Android only. The SDK doesn't support Windows, and
-App Store purchases in a DMG distributed outside the Mac App Store aren't documented as
-working. RevenueCat **Web Billing** works the same on both platforms, and its paywall
-offers Apple Pay and Google Pay where the browser supports them.
+**How Pro works.** Pro belongs to an **email**. It's on while the email has an active
+document in `grants` (forever, or until a date). A grant is created when an admin
+approves a Pro request (in the panel or the bot) or gives Pro directly in **Give Pro**
+(this works even before the person signs up). The app signs in with that email and
+sees Pro within 30 minutes, or right away with ❄ → Refresh Pro Status.
+
+**Sync between the panel and the bot.** Every approve / reject / remove goes through one
+server function (`decideRequest` in `firebase/functions/src/telegram.ts`). It changes
+Firestore, then edits the request's bot message (text + buttons). The panel shows requests
+with a live Firestore listener, so a press in Telegram appears in the panel without a
+reload. Removing a request's Pro in **Give Pro** or the user drawer also marks the request
+"Pro bekor qilindi" in the bot (the `onGrantUpdated` trigger). If both sides press at the
+same time, the second press is a no-op ("Holat allaqachon o'zgargan").
 
 **Pro unlocks:** Heavy and Blizzard snowfall, High and Ultra quality. Change the sets in
 `OverlayController.proIntensities` / `proQualities`. Everything else stays free.
 A build without `WINTER_API_URL` has no account features and nothing is locked.
 
 **Data collected** (for the admin panel): a random install id, platform, OS version, app
-version, first/last seen, launch count, and the email of signed-in users. No IP addresses
-and no names. Mention this in your privacy policy.
+version, first/last seen, launch count, and the email of signed-in users. A Pro request also
+stores the name and, if given, the Telegram username and phone number, and sends them to
+the admin Telegram chat. Mention this in your privacy policy.
 
 ## 1. Firebase
 
@@ -44,10 +49,10 @@ and no names. Mention this in your privacy policy.
    is too old for firebase-admin 14.
    ```sh
    npx firebase-tools@15 login
-   npx firebase-tools@15 use --add            # pick your project
-   npx firebase-tools@15 functions:secrets:set REVENUECAT_SECRET_KEY    # RevenueCat secret API key (v1)
-   npx firebase-tools@15 functions:secrets:set REVENUECAT_WEBHOOK_AUTH  # any long random string
-   printf 'PORTAL_URL=https://<project>.web.app\n' > firebase/functions/.env.<project>
+   npx firebase-tools@15 use --add                                     # pick your project
+   npx firebase-tools@15 functions:secrets:set TELEGRAM_BOT_TOKEN      # from @BotFather
+   npx firebase-tools@15 functions:secrets:set TELEGRAM_WEBHOOK_SECRET # any long random string: openssl rand -hex 32
+   printf 'PORTAL_URL=https://<project>.web.app\nTELEGRAM_CHAT_ID=<chat id>\n' > firebase/functions/.env.<project>
    (cd portal && npm install && npm run build)
    npx firebase-tools@15 deploy                # functions + Firestore rules + portal hosting
    ```
@@ -57,31 +62,19 @@ and no names. Mention this in your privacy policy.
 6. **First admin**: in Firestore, create the collection `admins` with a document whose ID is
    your email in lower case (field `addedAt` = now). After that, add more admins in the panel.
 
-## 2. RevenueCat
+## 2. Telegram bot
 
-1. Create a project, then add a **Web Billing** app and connect Stripe.
-2. **Products**:
-   - `monthly`: subscription, 1 month (optionally with a free trial).
-   - `yearly`: subscription, 1 year (e.g. a 7-day free trial).
-   - `lifetime`: one-time purchase (non-consumable).
-3. **Entitlement** `winter_pro`: attach all three products.
-4. **Offering** `default` (mark it Current), with packages:
-   - `$rc_monthly` → `monthly`
-   - `$rc_annual` → `yearly`
-   - `$rc_lifetime` → `lifetime`
-5. **Paywall**: create one for the `default` offering. The portal shows it with `presentPaywall`.
-6. **API keys**:
-   - Web Billing **public** key → `VITE_REVENUECAT_WEB_KEY`.
-   - A **secret** key (REST API v1) → the `REVENUECAT_SECRET_KEY` secret.
-
-   The `test_…` key is for the Test Store in the mobile SDKs and isn't used here. For
-   testing, use the Web Billing **sandbox** key and Stripe test cards.
-7. **Webhook** (Integrations → Webhooks):
-   - URL: `https://europe-west1-<project>.cloudfunctions.net/revenuecatWebhook`
-   - Authorization header: the `REVENUECAT_WEBHOOK_AUTH` value.
-   - Send a test event. It should return 200.
-8. **Apple Pay / Google Pay**: turn them on in Stripe (Settings → Payment methods). For
-   Apple Pay, register the portal's domain in Stripe (Payment method domains).
+1. Create the bot with @BotFather (`/newbot`); the token goes into the `TELEGRAM_BOT_TOKEN`
+   secret. Never commit it: the repo is public.
+2. **Chat id**: the chat that gets the notifications. For a private chat, it's your own user
+   id. You can also add the bot to a group and use the group's id (negative). After step 3,
+   send `/id` to the bot in that chat and it replies with the id.
+3. Open the admin panel → **Pro requests** → **Connect buttons**. This registers the
+   `telegramWebhook` URL with Telegram (with the secret), so the inline buttons work. The card
+   shows **Connected** when done. Notifications work even without this step; only the
+   buttons need it.
+4. Only presses from `TELEGRAM_CHAT_ID` are accepted. Anyone in that chat can approve, and the
+   panel shows who did (`telegram:@username`).
 
 ## 3. App builds
 
@@ -91,30 +84,24 @@ flutter build windows --release --dart-define=WINTER_API_URL=https://europe-west
 ```
 
 In GitHub, set the repository **variable** `WINTER_API_URL` (Settings → Secrets and
-variables → Actions → Variables). The CI installers then include accounts. Never put the
-RevenueCat secret key in the app.
+variables → Actions → Variables). The CI installers then include accounts.
 
 ## Local development / tests
 
 ```sh
 npx firebase-tools@15 emulators:start --only auth,firestore,functions --project demo-winter
-python3 firebase/tests/e2e.py      # 43 checks: sign-in, linking, grants, webhook, security rules
+python3 firebase/tests/e2e.py      # 69 checks, with a fake Telegram API on 127.0.0.1:8765
 cd portal && npm run dev           # .env.local with VITE_USE_EMULATORS=true (see .env.example)
 flutter run -d macos --dart-define=WINTER_API_URL=http://127.0.0.1:5001/demo-winter/europe-west1/app
 ```
 
-Local secrets live in `firebase/functions/.secret.local` (`REVENUECAT_WEBHOOK_AUTH=local-webhook-secret`,
-`REVENUECAT_SECRET_KEY=unset`). Sign-in links appear in the Auth emulator
-(http://127.0.0.1:4000/auth); the emulator's Google popup accepts any test account.
+Local settings (both gitignored):
+- `firebase/functions/.secret.local`:
+  `TELEGRAM_BOT_TOKEN=<token or anything>`, `TELEGRAM_WEBHOOK_SECRET=local-telegram-secret`.
+- `firebase/functions/.env.local`: `PORTAL_URL=http://localhost:5173`, `TELEGRAM_CHAT_ID=…`.
+  For e2e.py, also `TELEGRAM_API=http://127.0.0.1:8765` and `TELEGRAM_CHAT_ID=1000`. Without
+  `TELEGRAM_API` the emulator sends real messages to your bot. The buttons can't reach a local
+  emulator, but e2e.py posts the same updates Telegram would.
 
-## How access is decided (server, `firebase/functions/src/pro.ts`)
-
-1. An active **free grant** for the user's email (given in the panel; can have an end
-   date) → Pro.
-2. Otherwise the `winter_pro` entitlement from RevenueCat → Pro while it's a trial, an
-   active subscription (also after cancelling, until the period ends), or lifetime. It's
-   kept current by the webhook, re-read from the RevenueCat API when older than 15 minutes,
-   and refreshed right after a purchase.
-
-The app caches the answer, so Pro keeps working offline for up to 14 days. A subscription
-whose period ended needs a fresh check.
+Sign-in links appear in the Auth emulator (http://127.0.0.1:4000/auth). The emulator's Google
+popup accepts any test account.
