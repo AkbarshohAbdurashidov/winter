@@ -88,3 +88,25 @@ Limitations:
 - Windows: none of this desktop integration exists on Windows yet (needs EnumWindows tracking,
   taskbar instead of Dock, hit-region click-through). The Dart side is platform-neutral.
 - Snowmen and piles aren't saved between launches.
+
+## Packaging & Windows verification (2026-11-14)
+
+Installers (built by `.github/workflows/release.yml`, also locally via `scripts/build_macos_dmg.sh`):
+- `Winter-<v>-macOS.dmg` — universal (arm64 + x86_64), ad-hoc signed, not notarized. Verified:
+  mounts, contains Winter.app + Applications link, launches from the DMG, menu-bar only (LSUIElement).
+- `Winter-<v>-Windows-Setup.exe` (Inno Setup: per-user install, optional start at sign-in, uninstaller)
+  and `Winter-<v>-Windows-portable.zip`. Unsigned → SmartScreen warning.
+
+Windows build — verified by the CI smoke test (Windows Server 2025 VM, no GPU, 1024×768):
+- compiles; launches; stays alive; single instance; tray icon added.
+- overlay window visible, topmost, covers the monitor; Flutter view child visible.
+- animating at ~64 FPS, UI 0.2 ms, raster 3.6 ms (software rendering).
+- desktop geometry received: other windows tracked, taskbar used as the Dock; snow accumulates.
+- **click-through verified**: `WindowFromPoint` at the screen centre returns the window beneath, not
+  the overlay (`WS_EX_LAYERED | WS_EX_TRANSPARENT` set).
+- ~133–143 MB working set; ~2–2.6 s CPU over 55 s on the VM.
+
+Not verifiable in CI: what the overlay *looks like*. GDI screen capture and PrintWindow cannot read
+Flutter's DirectComposition output on the GPU-less runner, so per-pixel transparency, icicle/snow
+appearance and mouse interaction (rolling snowballs, breaking icicles) on Windows still need a test on
+a real Windows 10/11 PC. Run with `Winter.exe --diagnostics status.json` to get a status file.
