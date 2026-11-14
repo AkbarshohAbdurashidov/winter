@@ -152,7 +152,17 @@ class IcicleSystem {
   }
 
   /// [groundAt] returns the y of the Dock (or floor) top at x.
-  void step(double dt, DebrisSystem debris, double Function(double x) groundAt) {
+  ///
+  /// [obstacle] reports objects in the way (snowballs, snowmen): given the
+  /// tip's x and its vertical sweep it returns the contact y, or null.
+  /// [onImpact] is called after a piece shatters on an obstacle.
+  void step(
+    double dt,
+    DebrisSystem debris,
+    double Function(double x) groundAt, {
+    double? Function(double x, double prevY, double y)? obstacle,
+    void Function(FallingIcicle piece, double x, double y)? onImpact,
+  }) {
     for (final ic in icicles) {
       if (ic.length < ic.maxLength) {
         final rate = ic.maxLength / ic.growthTime;
@@ -184,11 +194,19 @@ class IcicleSystem {
 
     for (var i = falling.length - 1; i >= 0; i--) {
       final f = falling[i];
+      final prevTipY = f.y + math.cos(f.angle) * f.length;
       f.vy += DebrisSystem.gravity * dt;
       f.y += f.vy * dt;
       f.angle += f.spin * dt;
       final tipX = f.x - math.sin(f.angle) * f.length;
       final tipY = f.y + math.cos(f.angle) * f.length;
+      final hit = obstacle?.call(tipX, prevTipY, tipY);
+      if (hit != null) {
+        _shatter(f, debris, hit);
+        falling.removeAt(i);
+        onImpact?.call(f, tipX, hit);
+        continue;
+      }
       final ground = groundAt(tipX);
       if (tipY >= ground) {
         _shatter(f, debris, ground);

@@ -7,11 +7,13 @@
 #include <flutter_windows.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <optional>
 #include <utility>
 
 #include "flutter/generated_plugin_registrant.h"
 #include "resource.h"
+#include "utils.h"
 
 namespace {
 constexpr UINT kTrayMessage = WM_APP + 1;
@@ -20,6 +22,7 @@ constexpr UINT kMenuBase = 1000;
 constexpr UINT kMenuQuit = 999;
 constexpr UINT_PTR kMouseTimer = 1;     // 30 Hz cursor check
 constexpr UINT_PTR kGeometryTimer = 2;  // 20 Hz desktop geometry
+constexpr UINT kSyncMonitorsMessage = WM_APP + 2;
 
 using flutter::EncodableList;
 using flutter::EncodableMap;
@@ -88,10 +91,160 @@ BOOL CALLBACK CollectWindow(HWND hwnd, LPARAM lparam) {
   ctx->windows.emplace_back(hwnd, r);
   return TRUE;
 }
+
+BOOL CALLBACK CollectMonitor(HMONITOR monitor, HDC, LPRECT, LPARAM lparam) {
+  auto* list = reinterpret_cast<std::vector<MonitorInfo>*>(lparam);
+  MONITORINFO info{sizeof(MONITORINFO)};
+  if (GetMonitorInfo(monitor, &info)) {
+    MonitorInfo m;
+    m.rect = info.rcMonitor;  // physical pixels (PerMonitorV2 manifest)
+    m.scale = FlutterDesktopGetDpiForMonitor(monitor) / 96.0;
+    m.primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
+    list->push_back(m);
+  }
+  return TRUE;
+}
+
+// Primary display first.
+std::vector<MonitorInfo> EnumerateMonitors() {
+  std::vector<MonitorInfo> list;
+  EnumDisplayMonitors(nullptr, nullptr, CollectMonitor,
+                      reinterpret_cast<LPARAM>(&list));
+  std::stable_sort(list.begin(), list.end(),
+                   [](const MonitorInfo& a, const MonitorInfo& b) {
+                     return a.primary && !b.primary;
+                   });
+  return list;
+}
+
+bool SameRect(const RECT& a, const RECT& b) {
+  return a.left == b.left && a.top == b.top && a.right == b.right &&
+         a.bottom == b.bottom;
+}
+
+// Bottom taskbar on the given display (primary or secondary), unless
+// auto-hidden. Physical pixels.
+bool FindTaskbar(const RECT& mon, RECT* out) {
+  APPBARDATA abd{sizeof(APPBARDATA)};
+  const UINT state = static_cast<UINT>(SHAppBarMessage(ABM_GETSTATE, &abd));
+  if (state & ABS_AUTOHIDE) return false;
+  for (const wchar_t* cls : {L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd"}) {
+    HWND h = nullptr;
+    while ((h = FindWindowEx(nullptr, h, cls, nullptr)) != nullptr) {
+      if (!IsWindowVisible(h)) continue;
+      RECT t{};
+      if (!GetWindowRect(h, &t)) continue;
+      const LONG w = t.right - t.left, ht = t.bottom - t.top;
+      if (w > ht && ht > 4 && t.left >= mon.left - 2 &&
+          t.right <= mon.right + 2 && std::abs(t.bottom - mon.bottom) <= 2 &&
+          t.top > mon.top) {
+        *out = t;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+flutter::DartProject g_project(L"data");
+std::vector<std::string> g_base_args;
+std::vector<std::unique_ptr<FlutterWindow>> g_overlays;
+int g_next_screen_id = 0;
+
+std::unique_ptr<FlutterWindow> CreateOverlay(const MonitorInfo& monitor,
+                                             bool is_host) {
+  const int id = g_next_screen_id++;
+  flutter::DartProject project = g_project;
+  std::vector<std::string> args = g_base_args;
+  args.push_back("--screen");
+  args.push_back(std::to_string(id));
+  project.set_dart_entrypoint_arguments(std::move(args));
+  auto window = std::make_unique<FlutterWindow>(project, id, monitor, is_host);
+  if (!window->Create(L"Winter", Win32Window::Point(0, 0),
+                      Win32Window::Size(800, 600))) {
+    return nullptr;
+  }
+  if (is_host) window->SetQuitOnClose(true);
+  return window;
+}
+
+// One overlay per display; the host stays on the primary display.
+void SyncMonitors() {
+  std::vector<MonitorInfo> monitors = EnumerateMonitors();
+  if (monitors.empty()) return;
+  std::vector<bool> covered(monitors.size(), false);
+
+  for (auto& w : g_overlays) {
+    if (w->is_host()) {
+      w->SetMonitor(monitors[0]);
+      covered[0] = true;
+    }
+  }
+  for (auto it = g_overlays.begin(); it != g_overlays.end();) {
+    if ((*it)->is_host()) {
+      ++it;
+      continue;
+    }
+    bool keep = false;
+    for (size_t i = 0; i < monitors.size(); ++i) {
+      if (!covered[i] && SameRect(monitors[i].rect, (*it)->monitor().rect)) {
+        (*it)->SetMonitor(monitors[i]);
+        covered[i] = keep = true;
+        break;
+      }
+    }
+    if (keep) {
+      ++it;
+    } else {
+      it = g_overlays.erase(it);  // destroys the window and its engine
+    }
+  }
+  for (size_t i = 0; i < monitors.size(); ++i) {
+    if (covered[i]) continue;
+    if (auto w = CreateOverlay(monitors[i], false)) {
+      g_overlays.push_back(std::move(w));
+    }
+  }
+  for (auto& w : g_overlays) w->NotifyDisplaysChanged();
+}
 }  // namespace
 
-FlutterWindow::FlutterWindow(const flutter::DartProject& project)
-    : project_(project) {}
+bool StartOverlays(const flutter::DartProject& project) {
+  g_project = project;
+  g_base_args = GetCommandLineArguments();
+  std::vector<MonitorInfo> monitors = EnumerateMonitors();
+  if (monitors.empty()) {
+    MonitorInfo m;
+    m.rect = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    m.primary = true;
+    monitors.push_back(m);
+  }
+  auto host = CreateOverlay(monitors[0], true);
+  if (!host) return false;
+  g_overlays.push_back(std::move(host));
+  for (size_t i = 1; i < monitors.size(); ++i) {
+    if (auto w = CreateOverlay(monitors[i], false)) {
+      g_overlays.push_back(std::move(w));
+    }
+  }
+  return true;
+}
+
+void StopOverlays() { g_overlays.clear(); }
+
+namespace {
+void BroadcastMenuAction(const std::string& action) {
+  for (auto& w : g_overlays) w->SendMenuAction(action);
+}
+}  // namespace
+
+FlutterWindow::FlutterWindow(const flutter::DartProject& project,
+                             int screen_id, const MonitorInfo& monitor,
+                             bool is_host)
+    : project_(project),
+      screen_id_(screen_id),
+      is_host_(is_host),
+      monitor_(monitor) {}
 
 FlutterWindow::~FlutterWindow() {}
 
@@ -101,7 +254,7 @@ bool FlutterWindow::OnCreate() {
   }
 
   MakeTransparent();
-  FitToPrimaryMonitor();
+  FitToMonitor();
 
   RECT frame = GetClientArea();
   flutter_controller_ = std::make_unique<flutter::FlutterViewController>(
@@ -119,8 +272,10 @@ bool FlutterWindow::OnCreate() {
     HandleMethodCall(call, std::move(result));
   });
 
-  taskbar_created_message_ = RegisterWindowMessage(L"TaskbarCreated");
-  AddTrayIcon();
+  if (is_host_) {
+    taskbar_created_message_ = RegisterWindowMessage(L"TaskbarCreated");
+    AddTrayIcon();
+  }
   display_notify_ = RegisterPowerSettingNotification(
       GetHandle(), &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE);
 
@@ -153,12 +308,17 @@ void FlutterWindow::MakeTransparent() {
   SetTransparentAccent(hwnd);
 }
 
-void FlutterWindow::FitToPrimaryMonitor() {
-  HMONITOR monitor = MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
-  MONITORINFO info{sizeof(MONITORINFO)};
-  if (!GetMonitorInfo(monitor, &info)) return;
-  monitor_.rect = info.rcMonitor;  // physical pixels (PerMonitorV2 manifest)
-  monitor_.scale = FlutterDesktopGetDpiForMonitor(monitor) / 96.0;
+void FlutterWindow::SetMonitor(const MonitorInfo& monitor) {
+  monitor_ = monitor;
+  FitToMonitor();
+}
+
+void FlutterWindow::NotifyDisplaysChanged() {
+  last_geometry_.clear();
+  if (channel_) channel_->InvokeMethod("displaysChanged", nullptr);
+}
+
+void FlutterWindow::FitToMonitor() {
   const RECT& r = monitor_.rect;
   HWND after = level_ == "desktop" ? HWND_BOTTOM : HWND_TOPMOST;
   SetWindowPos(GetHandle(), after, r.left, r.top, r.right - r.left,
@@ -229,6 +389,8 @@ void FlutterWindow::PollGeometry() {
 
   std::vector<double> flat;
   for (auto& [hwnd, r] : ctx.windows) {
+    RECT overlap{};
+    if (!IntersectRect(&overlap, &r, &monitor_.rect)) continue;
     const double w = (r.right - r.left) / s, h = (r.bottom - r.top) / s;
     if (w < 120 || h < 60) continue;
     flat.push_back(static_cast<double>(reinterpret_cast<intptr_t>(hwnd) & 0x7fffffff));
@@ -241,11 +403,8 @@ void FlutterWindow::PollGeometry() {
   // The taskbar plays the role of the Dock when it is at the bottom and not
   // auto-hidden.
   std::vector<double> dock;
-  APPBARDATA abd{sizeof(APPBARDATA)};
-  const UINT state = static_cast<UINT>(SHAppBarMessage(ABM_GETSTATE, &abd));
-  if (!(state & ABS_AUTOHIDE) && SHAppBarMessage(ABM_GETTASKBARPOS, &abd) &&
-      abd.uEdge == ABE_BOTTOM) {
-    const RECT& t = abd.rc;
+  RECT t{};
+  if (FindTaskbar(monitor_.rect, &t)) {
     dock = {(t.left - ox) / s, (t.top - oy) / s, (t.right - t.left) / s,
             (t.bottom - t.top) / s};
   }
@@ -328,6 +487,9 @@ void FlutterWindow::HandleMethodCall(
         {EncodableValue("hitRegions"), EncodableValue(static_cast<int>(hit_regions_.size()))},
         {EncodableValue("trayAdded"), EncodableValue(tray_added_)},
         {EncodableValue("styleReapplied"), EncodableValue(style_reapplied_)},
+        {EncodableValue("screenId"), EncodableValue(screen_id_)},
+        {EncodableValue("primary"), EncodableValue(is_host_)},
+        {EncodableValue("overlays"), EncodableValue(static_cast<int>(g_overlays.size()))},
     };
     result->Success(EncodableValue(map));
   } else if (method == "requestGeometry") {
@@ -425,7 +587,8 @@ void FlutterWindow::ShowTrayMenu() {
   if (cmd == kMenuQuit) {
     DestroyWindow(GetHandle());
   } else if (cmd >= kMenuBase && cmd - kMenuBase < menu_actions_.size()) {
-    SendMenuAction(menu_actions_[cmd - kMenuBase]);
+    // Every display's overlay follows the same settings.
+    BroadcastMenuAction(menu_actions_[cmd - kMenuBase]);
   }
 }
 
@@ -505,10 +668,21 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_DPICHANGED:
     case WM_SETTINGCHANGE: {
       LRESULT r = Win32Window::MessageHandler(hwnd, message, wparam, lparam);
-      FitToPrimaryMonitor();
+      FitToMonitor();
       last_geometry_.clear();
-      if (channel_) channel_->InvokeMethod("displaysChanged", nullptr);
+      // Re-enumerate displays outside this handler: it may destroy windows.
+      if (is_host_ && message != WM_DPICHANGED) {
+        PostMessage(hwnd, kSyncMonitorsMessage, 0, 0);
+      }
       return r;
+    }
+    case kSyncMonitorsMessage: {
+      MSG pending;  // coalesce bursts of display notifications
+      while (PeekMessage(&pending, hwnd, kSyncMonitorsMessage,
+                         kSyncMonitorsMessage, PM_REMOVE)) {
+      }
+      SyncMonitors();
+      return 0;
     }
     case WM_POWERBROADCAST:
       if (wparam == PBT_APMSUSPEND) {

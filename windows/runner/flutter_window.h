@@ -14,13 +14,34 @@
 
 #include "win32_window.h"
 
-// Transparent, topmost overlay hosting the Flutter view: click-through except
-// over interactive regions, desktop geometry (windows + taskbar) for snow
-// accumulation, tray icon menu, and sleep / display-off pausing.
+// One display: rectangle in physical pixels and its scale factor.
+struct MonitorInfo {
+  RECT rect{};
+  double scale = 1;  // physical px per logical px
+  bool primary = false;
+};
+
+// Starts one overlay per connected display (the first one, on the primary
+// display, also owns the tray icon) and keeps that set in sync when
+// displays are added, removed or rearranged.
+bool StartOverlays(const flutter::DartProject& project);
+void StopOverlays();
+
+// Transparent, topmost overlay for one display hosting its own Flutter
+// engine: click-through except over interactive regions, desktop geometry
+// (windows + taskbar on that display) for snow accumulation, tray icon menu
+// (host only), and sleep / display-off pausing.
 class FlutterWindow : public Win32Window {
  public:
-  explicit FlutterWindow(const flutter::DartProject& project);
+  FlutterWindow(const flutter::DartProject& project, int screen_id,
+                const MonitorInfo& monitor, bool is_host);
   virtual ~FlutterWindow();
+
+  bool is_host() const { return is_host_; }
+  const MonitorInfo& monitor() const { return monitor_; }
+  void SetMonitor(const MonitorInfo& monitor);
+  void SendMenuAction(const std::string& action);
+  void NotifyDisplaysChanged();
 
  protected:
   bool OnCreate() override;
@@ -29,13 +50,8 @@ class FlutterWindow : public Win32Window {
                          LPARAM const lparam) noexcept override;
 
  private:
-  struct Monitor {
-    RECT rect{};       // physical pixels
-    double scale = 1;  // physical px per logical px
-  };
-
   void MakeTransparent();
-  void FitToPrimaryMonitor();
+  void FitToMonitor();
   void ApplyLevel(const std::string& level);
   void SetIgnoreMouse(bool ignore);
   void UpdateInteractive(bool force);
@@ -46,7 +62,6 @@ class FlutterWindow : public Win32Window {
   void AddTrayIcon();
   void RemoveTrayIcon();
   void ShowTrayMenu();
-  void SendMenuAction(const std::string& action);
   void PublishVisibility(const char* reason);
   std::string StateString(const char* key) const;
   bool StateBool(const char* key) const;
@@ -55,7 +70,9 @@ class FlutterWindow : public Win32Window {
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
 
-  Monitor monitor_;
+  int screen_id_ = 0;
+  bool is_host_ = false;
+  MonitorInfo monitor_;
   NOTIFYICONDATA tray_icon_{};
   bool tray_added_ = false;
   UINT taskbar_created_message_ = 0;

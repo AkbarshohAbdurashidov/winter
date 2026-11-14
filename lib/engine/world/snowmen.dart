@@ -41,6 +41,9 @@ class SnowBall {
   /// Hidden while its supporting window is not on screen.
   bool hidden = false;
 
+  /// Seconds during which this ball won't stack (it was just knocked off).
+  double noStack = 0;
+
   static const double minRadius = 5;
   static const double maxRadius = 70;
 
@@ -82,4 +85,33 @@ class Snowman {
         r.right + body.radius * 1.2, r.bottom);
     return r;
   }
+}
+
+/// Snowman accessories that can come loose and fall.
+enum PropKind { hat, nose, scarf, armLeft, armRight }
+
+/// A loose accessory: falls, tumbles, lands on a surface and fades away.
+class FallingProp {
+  FallingProp({
+    required this.kind,
+    required this.x,
+    required this.y,
+    required this.vx,
+    required this.vy,
+    required this.spin,
+    required this.size,
+    required this.facing,
+  });
+
+  final PropKind kind;
+  double x, y, vx, vy, spin;
+  double angle = 0;
+
+  /// Head radius of the snowman it came from (drawing scale).
+  final double size;
+  final double facing;
+  bool resting = false;
+  double life = 9;
+
+  double get opacity => life < 1.5 ? (life / 1.5).clamp(0, 1) : 1;
 }

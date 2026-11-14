@@ -1,7 +1,9 @@
 import 'dart:ui';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:winter/engine/world/icicles.dart';
 import 'package:winter/engine/world/snow_pile.dart';
+import 'package:winter/engine/world/snowmen.dart';
 import 'package:winter/engine/world/winter_world.dart';
 import 'package:winter/platform/overlay_platform.dart';
 
@@ -147,6 +149,87 @@ void main() {
       }
       expect(w.icicles.falling, isEmpty);
       expect(w.debris.count, greaterThan(0));
+    });
+  });
+
+  group('snowman damage and rebuilding', () {
+    /// Drops balls of the given radii at [x] onto the floor, one after another.
+    WinterWorld buildStack(List<double> radii, {double x = 150}) {
+      final w = WinterWorld()..applyGeometry(_geometry(const []));
+      for (final r in radii) {
+        w.balls.add(SnowBall(x, 300, r, w.balls.length * 2 + 1)..state = BallState.falling);
+        for (var k = 0; k < 90; k++) {
+          w.step(1 / 60);
+        }
+      }
+      for (var k = 0; k < 120; k++) {
+        w.step(1 / 60); // let the decorations finish appearing
+      }
+      return w;
+    }
+
+    test('three dropped balls make a snowman', () {
+      final w = buildStack([30, 22, 15]);
+      expect(w.snowmen, hasLength(1));
+    });
+
+    test('a falling icicle hitting the snowman breaks it apart', () {
+      final w = buildStack([30, 22, 15]);
+      final head = w.snowmen.single.head;
+      w.icicles.falling.add(FallingIcicle(head.x, 0, 90, 10, Path(), 0));
+      for (var k = 0; k < 90; k++) {
+        w.step(1 / 60);
+      }
+      expect(w.icicles.falling, isEmpty);
+      expect(w.snowmen, isEmpty);
+      expect(w.balls.every((b) => b.snowman == null), isTrue);
+      expect(w.props, isNotEmpty, reason: 'hat, nose, scarf and arms fall off');
+      expect(w.debris.count, greaterThan(0));
+    });
+
+    test('balls of a broken snowman can be stacked into a new one', () {
+      final w = buildStack([30, 22, 15]);
+      final head = w.snowmen.single.head;
+      // Pull the head off by hand, put it on the ground next to it, then back.
+      void dragTo(Offset target) {
+        final start = Offset(head.x, head.y);
+        for (var k = 1; k <= 30; k++) {
+          w.pointerMove(Offset.lerp(start, target, k / 30)!);
+          w.step(1 / 60);
+        }
+        for (var k = 0; k < 10; k++) {
+          w.pointerMove(target); // hold still before letting go
+          w.step(1 / 60);
+        }
+        w.pointerUp();
+      }
+
+      expect(w.pointerDown(Offset(head.x, head.y)), isTrue);
+      expect(w.snowmen, isEmpty, reason: 'grabbing the head takes it off');
+      dragTo(const Offset(250, 600));
+      for (var k = 0; k < 120; k++) {
+        w.step(1 / 60);
+      }
+      expect(w.snowmen, isEmpty);
+      final body = w.balls.firstWhere((b) => b.radius > 20 && b.radius < 25);
+      expect(w.pointerDown(Offset(head.x, head.y)), isTrue);
+      dragTo(Offset(body.x, 600));
+      for (var k = 0; k < 120; k++) {
+        w.step(1 / 60);
+      }
+      expect(w.snowmen, hasLength(1), reason: 'restacked');
+    });
+
+    test('dropping a whole snowman keeps it in one piece', () {
+      final w = buildStack([30, 22, 15]);
+      final base = w.snowmen.single.base;
+      expect(w.pointerDown(Offset(base.x, base.y)), isTrue);
+      w.pointerMove(Offset(base.x + 300, 400));
+      w.pointerUp();
+      for (var k = 0; k < 120; k++) {
+        w.step(1 / 60);
+      }
+      expect(w.snowmen, hasLength(1));
     });
   });
 }

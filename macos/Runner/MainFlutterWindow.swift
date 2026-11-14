@@ -1,18 +1,10 @@
 import Cocoa
 import FlutterMacOS
 
-/// Transparent, borderless overlay covering the primary screen.
-///
-/// An `NSPanel` with `.nonactivatingPanel` so clicking snow, snowballs or
-/// icicles never steals focus from the app the user is working in.
-class MainFlutterWindow: NSPanel {
-  private var overlay: OverlayController?
-
-  override func awakeFromNib() {
-    let flutterViewController = FlutterViewController()
-    flutterViewController.backgroundColor = .clear
-    self.contentViewController = flutterViewController
-
+/// Borderless, transparent, non-activating panel used for every screen's
+/// overlay. Clicking snow never steals focus from the user's app.
+class OverlayPanel: NSPanel {
+  func configureAsOverlay() {
     styleMask = [.borderless, .nonactivatingPanel]
     isFloatingPanel = true
     becomesKeyOnlyIfNeeded = true
@@ -24,84 +16,201 @@ class MainFlutterWindow: NSPanel {
     ignoresMouseEvents = true
     acceptsMouseMovedEvents = true
     collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
-
-    RegisterGeneratedPlugins(registry: flutterViewController)
-
-    overlay = OverlayController(window: self, messenger: flutterViewController.engine.binaryMessenger)
-    overlay?.applyLevel("aboveWindows")
-    overlay?.fitToScreen()
-
-    super.awakeFromNib()
   }
 
   override var canBecomeKey: Bool { false }
   override var canBecomeMain: Bool { false }
 }
 
-/// Native side of the `winter/overlay` channel.
-///
-/// - window level, click-through and interactive hit regions
-/// - desktop geometry (other apps' windows, Dock, menu bar), polled off the main thread
-/// - status-bar menu, occlusion and sleep notifications
-final class OverlayController: NSObject {
-  private weak var window: NSWindow?
-  private let channel: FlutterMethodChannel
-  private let statusItem: NSStatusItem
+/// The window from MainMenu.xib. It becomes the overlay of the first screen;
+/// `OverlayManager` creates one more overlay (with its own Flutter engine)
+/// for each additional display.
+class MainFlutterWindow: OverlayPanel {
+  override func awakeFromNib() {
+    let controller = ScreenOverlay.makeViewController(screenId: 0)
+    self.contentViewController = controller
+    configureAsOverlay()
+    OverlayManager.shared.start(primaryPanel: self, controller: controller)
+    super.awakeFromNib()
+  }
+}
+
+// MARK: - One screen
+
+/// The overlay for one display: its panel, Flutter view, channel and the
+/// interactive regions reported by its Dart side.
+final class ScreenOverlay: NSObject {
+  let panel: OverlayPanel
+  let controller: FlutterViewController
+  let channel: FlutterMethodChannel
+  let isPrimary: Bool
+  var displayID: CGDirectDisplayID = 0
+
+  // Main-thread state.
+  var hitRegions: [CGRect] = []
+  var interactive = false
+  var occluded = false
+
+  // Geometry-queue state.
+  var lastGeometry: [String: AnyHashable] = [:]
+
+  static func makeViewController(screenId: Int) -> FlutterViewController {
+    let project = FlutterDartProject()
+    // Keep command-line flags (e.g. --diagnostics) and add the screen id.
+    project.dartEntrypointArguments = Array(CommandLine.arguments.dropFirst()) + ["--screen", "\(screenId)"]
+    let controller = FlutterViewController(project: project)
+    controller.backgroundColor = .clear
+    RegisterGeneratedPlugins(registry: controller)
+    return controller
+  }
+
+  init(panel: OverlayPanel, controller: FlutterViewController, isPrimary: Bool) {
+    self.panel = panel
+    self.controller = controller
+    self.isPrimary = isPrimary
+    self.channel = FlutterMethodChannel(
+      name: "winter/overlay", binaryMessenger: controller.engine.binaryMessenger)
+    super.init()
+  }
+
+  /// Creates an overlay (and Flutter engine) for an additional display.
+  static func create(for screen: NSScreen, id: Int) -> ScreenOverlay {
+    let controller = makeViewController(screenId: id)
+    let panel = OverlayPanel(
+      contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel],
+      backing: .buffered, defer: false)
+    panel.contentViewController = controller
+    panel.configureAsOverlay()
+    return ScreenOverlay(panel: panel, controller: controller, isPrimary: false)
+  }
+
+  var screen: NSScreen? {
+    NSScreen.screens.first { $0.displayID == displayID }
+  }
+
+  func send(_ method: String, _ args: Any?) {
+    channel.invokeMethod(method, arguments: args)
+  }
+
+  func destroy() {
+    channel.setMethodCallHandler(nil)
+    panel.orderOut(nil)
+    panel.contentViewController = nil
+    controller.engine.shutDownEngine()
+    panel.close()
+  }
+}
+
+extension NSScreen {
+  var displayID: CGDirectDisplayID {
+    (deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+  }
+}
+
+// MARK: - Manager
+
+/// Owns everything shared between screens: the status-bar menu, desktop
+/// geometry polling (one CGWindowList call for all screens), the cursor
+/// check for interactive regions, and display/sleep notifications.
+final class OverlayManager: NSObject {
+  static let shared = OverlayManager()
+
+  private var overlays: [ScreenOverlay] = []
+  private var statusItem: NSStatusItem?
   private var menuState: [String: Any] = [:]
+  private var level = "aboveWindows"
+  private var clickThroughEnabled = true
   private var observers: [NSObjectProtocol] = []
   private var screensAsleep = false
-  private var occluded = false
-
-  // Interactive regions (top-left origin, primary-screen points).
-  private var hitRegions: [CGRect] = []
   private var mouseTimer: Timer?
-  private var interactive = false
-  private var clickThroughEnabled = true
+  private var nextScreenId = 1
 
-  // Geometry polling.
   private let geometryQueue = DispatchQueue(label: "winter.geometry", qos: .utility)
   private var geometryTimer: DispatchSourceTimer?
-  private var lastGeometry: [String: AnyHashable] = [:]
   private let ownPid = ProcessInfo.processInfo.processIdentifier
-  private var dockCache: (key: String, rect: CGRect?, time: CFAbsoluteTime)?
+  private var dockCache: [String: (rect: CGRect?, time: CFAbsoluteTime)] = [:]  // geometry queue
 
-  init(window: NSWindow, messenger: FlutterBinaryMessenger) {
-    self.window = window
-    self.channel = FlutterMethodChannel(name: "winter/overlay", binaryMessenger: messenger)
-    self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-    super.init()
-
+  func start(primaryPanel: OverlayPanel, controller: FlutterViewController) {
     NSApp.setActivationPolicy(.accessory)
-    channel.setMethodCallHandler { [weak self] call, result in
-      self?.handle(call, result: result)
-    }
-    if let button = statusItem.button {
-      button.image = NSImage(systemSymbolName: "snowflake", accessibilityDescription: "Winter")
-      button.image?.isTemplate = true
-    }
+    let primary = ScreenOverlay(panel: primaryPanel, controller: controller, isPrimary: true)
+    primary.displayID = NSScreen.screens.first?.displayID ?? 0
+    attach(primary)
+
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    item.button?.image = NSImage(systemSymbolName: "snowflake", accessibilityDescription: "Winter")
+    item.button?.image?.isTemplate = true
+    statusItem = item
     rebuildMenu()
+
+    syncScreens()
     observe()
     startMouseTracking()
     startGeometryPolling()
   }
 
-  deinit {
-    mouseTimer?.invalidate()
-    geometryTimer?.cancel()
-    observers.forEach { NotificationCenter.default.removeObserver($0) }
-    observers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
+  private func attach(_ overlay: ScreenOverlay) {
+    overlays.append(overlay)
+    overlay.channel.setMethodCallHandler { [weak self, weak overlay] call, result in
+      guard let self = self, let overlay = overlay else { return result(nil) }
+      self.handle(call, from: overlay, result: result)
+    }
+  }
+
+  // MARK: Screens
+
+  /// Creates/removes overlays so that every display has exactly one.
+  func syncScreens() {
+    let screens = NSScreen.screens
+    let ids = Set(screens.map(\.displayID))
+
+    // Remove overlays of displays that are gone (the primary is reassigned).
+    for overlay in overlays where !ids.contains(overlay.displayID) && !overlay.isPrimary {
+      overlay.destroy()
+    }
+    overlays.removeAll { !ids.contains($0.displayID) && !$0.isPrimary }
+
+    if let primary = overlays.first(where: \.isPrimary), !ids.contains(primary.displayID) {
+      let taken = Set(overlays.filter { !$0.isPrimary }.map(\.displayID))
+      primary.displayID = screens.first { !taken.contains($0.displayID) }?.displayID
+        ?? screens.first?.displayID ?? 0
+      if overlays.contains(where: { !$0.isPrimary && $0.displayID == primary.displayID }) {
+        // Every remaining display already has an overlay; keep the primary on the first.
+        primary.displayID = screens.first?.displayID ?? 0
+      }
+    }
+
+    for screen in screens where !overlays.contains(where: { $0.displayID == screen.displayID }) {
+      let overlay = ScreenOverlay.create(for: screen, id: nextScreenId)
+      nextScreenId += 1
+      overlay.displayID = screen.displayID
+      attach(overlay)
+    }
+
+    for overlay in overlays {
+      if let screen = overlay.screen {
+        overlay.panel.setFrame(screen.frame, display: true)
+      }
+      applyLevel(to: overlay)
+      overlay.panel.ignoresMouseEvents = !(overlay.interactive || !clickThroughEnabled)
+    }
+    geometryQueue.async { [weak self] in
+      self?.dockCache.removeAll()
+      self?.overlays.forEach { $0.lastGeometry = [:] }
+    }
   }
 
   // MARK: Channel
 
-  private func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+  private func handle(_ call: FlutterMethodCall, from overlay: ScreenOverlay,
+                      result: @escaping FlutterResult) {
     switch call.method {
     case "setClickThrough":
       clickThroughEnabled = (call.arguments as? Bool) ?? true
       updateInteractive(force: true)
       result(nil)
     case "setLevel":
-      applyLevel(call.arguments as? String ?? "aboveWindows")
+      level = call.arguments as? String ?? "aboveWindows"
+      overlays.forEach(applyLevel(to:))
       result(nil)
     case "updateMenuState":
       menuState = call.arguments as? [String: Any] ?? [:]
@@ -117,47 +226,44 @@ final class OverlayController: NSObject {
           i += 4
         }
       }
-      hitRegions = rects
+      overlay.hitRegions = rects
+      result(nil)
+    case "requestGeometry":
+      geometryQueue.async { [weak self, weak overlay] in
+        overlay?.lastGeometry = [:]
+        self?.pollGeometry()
+      }
       result(nil)
     case "diagnostics":
-      let f = window?.frame ?? .zero
+      let f = overlay.panel.frame
       result([
-        "visible": window?.isVisible ?? false,
+        "visible": overlay.panel.isVisible,
         "rect": [f.minX, f.minY, f.maxX, f.maxY],
-        "level": window?.level.rawValue ?? 0,
-        "ignoringMouse": window?.ignoresMouseEvents ?? true,
-        "scale": window?.backingScaleFactor ?? 1,
-        "hitRegions": hitRegions.count,
+        "level": overlay.panel.level.rawValue,
+        "ignoringMouse": overlay.panel.ignoresMouseEvents,
+        "scale": overlay.panel.backingScaleFactor,
+        "hitRegions": overlay.hitRegions.count,
+        "screens": NSScreen.screens.count,
+        "overlays": overlays.count,
+        "primary": overlay.isPrimary,
       ])
-    case "requestGeometry":
-      lastGeometry = [:]
-      geometryQueue.async { [weak self] in self?.pollGeometry() }
-      result(nil)
     default:
       result(FlutterMethodNotImplemented)
     }
   }
 
-  func applyLevel(_ level: String) {
-    guard let window = window else { return }
+  private func applyLevel(to overlay: ScreenOverlay) {
     if level == "desktop" {
-      window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1)
+      overlay.panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 1)
     } else {
       // Above app windows, the Dock (20) and the menu bar (24).
-      window.level = .statusBar
+      overlay.panel.level = .statusBar
     }
-    window.orderFrontRegardless()
+    overlay.panel.orderFrontRegardless()
   }
 
-  private var primaryScreen: NSScreen? { NSScreen.screens.first }
-
-  func fitToScreen() {
-    guard let window = window, let screen = primaryScreen else { return }
-    window.setFrame(screen.frame, display: true)
-  }
-
-  private func send(_ method: String, _ args: Any?) {
-    channel.invokeMethod(method, arguments: args)
+  private func broadcast(_ method: String, _ args: Any?) {
+    overlays.forEach { $0.send(method, args) }
   }
 
   // MARK: Interactive regions
@@ -171,19 +277,21 @@ final class OverlayController: NSObject {
   }
 
   private func updateInteractive(force: Bool) {
-    guard let window = window, let screen = primaryScreen else { return }
-    // Never switch in the middle of a press: either the user is dragging in
-    // another app, or they are dragging a snowball here.
+    // Never switch in the middle of a press (dragging elsewhere, or dragging
+    // a snowball here).
     if !force && NSEvent.pressedMouseButtons != 0 { return }
-    var wantInteractive = !clickThroughEnabled
-    if !wantInteractive && !hitRegions.isEmpty {
-      let loc = NSEvent.mouseLocation
-      let p = CGPoint(x: loc.x - screen.frame.minX, y: screen.frame.maxY - loc.y)
-      wantInteractive = hitRegions.contains { $0.contains(p) }
-    }
-    if force || wantInteractive != interactive {
-      interactive = wantInteractive
-      window.ignoresMouseEvents = !wantInteractive
+    let loc = NSEvent.mouseLocation
+    for overlay in overlays {
+      var want = !clickThroughEnabled
+      if !want, !overlay.hitRegions.isEmpty, let screen = overlay.screen,
+         screen.frame.contains(loc) {
+        let p = CGPoint(x: loc.x - screen.frame.minX, y: screen.frame.maxY - loc.y)
+        want = overlay.hitRegions.contains { $0.contains(p) }
+      }
+      if force || want != overlay.interactive {
+        overlay.interactive = want
+        overlay.panel.ignoresMouseEvents = !want
+      }
     }
   }
 
@@ -197,71 +305,96 @@ final class OverlayController: NSObject {
     geometryTimer = timer
   }
 
-  /// Runs on `geometryQueue`. Sends only when something changed.
-  private func pollGeometry() {
-    guard let info = DispatchQueue.main.sync(execute: { () -> (CGRect, CGRect)? in
-      guard let s = self.primaryScreen else { return nil }
-      return (s.frame, s.visibleFrame)
-    }) else { return }
-    let (frame, visible) = info
-    var menuBarHeight = max(0, frame.maxY - visible.maxY)
-    var statusBottom: CGFloat = -1
+  private struct ScreenInfo {
+    let overlay: ScreenOverlay
+    let frame: CGRect      // Cocoa coordinates
+    let visible: CGRect    // Cocoa coordinates
+    let cgFrame: CGRect    // global top-left coordinates (CGWindowList space)
+  }
 
-    var flat: [Double] = []
+  /// Runs on `geometryQueue`: one window-list query for all screens, then a
+  /// per-screen message only when that screen's geometry changed.
+  private func pollGeometry() {
+    let infos: [ScreenInfo] = DispatchQueue.main.sync {
+      let primaryHeight = NSScreen.screens.first?.frame.height ?? 0
+      return overlays.compactMap { overlay in
+        guard let s = overlay.screen else { return nil }
+        let f = s.frame
+        let cg = CGRect(x: f.minX, y: primaryHeight - f.maxY, width: f.width, height: f.height)
+        return ScreenInfo(overlay: overlay, frame: f, visible: s.visibleFrame, cgFrame: cg)
+      }
+    }
+    if infos.isEmpty { return }
+
+    var windows: [(id: Int, rect: CGRect)] = []
+    var statusItems: [CGRect] = []
     if let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] {
       for w in list {  // front-to-back order
         let layer = w[kCGWindowLayer as String] as? Int ?? -1
         let pid = w[kCGWindowOwnerPID as String] as? Int32
-        // Menu-bar status items (layer 25) are on screen only while the menu
-        // bar is shown; their bottom edge is the menu bar's bottom edge. This
-        // also tracks an auto-hiding menu bar as it slides in and out.
-        if layer == Int(CGWindowLevelForKey(.statusWindow)), pid != ownPid,
-           let b = w[kCGWindowBounds as String] as? [String: Any],
-           let r = CGRect(dictionaryRepresentation: b as CFDictionary),
-           r.minY > -60, r.minY <= 2, r.height <= 50 {
-          statusBottom = max(statusBottom, r.maxY)
+        guard pid != ownPid,
+              let b = w[kCGWindowBounds as String] as? [String: Any],
+              let rect = CGRect(dictionaryRepresentation: b as CFDictionary) else { continue }
+        if layer == Int(CGWindowLevelForKey(.statusWindow)), rect.height <= 50 {
+          statusItems.append(rect)
+          continue
         }
         guard layer == 0,
-              pid != ownPid,
               (w[kCGWindowAlpha as String] as? Double ?? 1) > 0.05,
-              let b = w[kCGWindowBounds as String] as? [String: Any],
-              let rect = CGRect(dictionaryRepresentation: b as CFDictionary),
               rect.width >= 120, rect.height >= 60,
-              let id = w[kCGWindowNumber as String] as? Int
-        else { continue }
-        flat.append(contentsOf: [Double(id), rect.minX, rect.minY, rect.width, rect.height])
+              let id = w[kCGWindowNumber as String] as? Int else { continue }
+        windows.append((id, rect))
       }
     }
 
-    if statusBottom >= 0 { menuBarHeight = statusBottom }
-    let dock = estimateDockRect(frame: frame, visible: visible)
-    let geometry: [String: AnyHashable] = [
-      "screenW": frame.width,
-      "screenH": frame.height,
-      "menuBarH": menuBarHeight,
-      "menuBarThickness": NSStatusBar.system.thickness,
-      "dock": dock.map { [$0.minX, $0.minY, $0.width, $0.height] } ?? [],
-      "windows": flat,
-    ]
-    if geometry == lastGeometry { return }
-    lastGeometry = geometry
-    DispatchQueue.main.async { [weak self] in self?.send("geometry", geometry) }
+    for info in infos {
+      let screen = info.cgFrame
+      var flat: [Double] = []
+      for w in windows where w.rect.intersects(screen) {
+        flat.append(contentsOf: [Double(w.id), w.rect.minX - screen.minX, w.rect.minY - screen.minY,
+                                 w.rect.width, w.rect.height])
+      }
+      // Menu bar: status items on this screen's top edge are on screen only
+      // while its menu bar is shown (also tracks an auto-hiding menu bar).
+      var menuBarHeight = max(0, info.frame.maxY - info.visible.maxY)
+      var statusBottom: CGFloat = -1
+      for r in statusItems where r.midX >= screen.minX && r.midX <= screen.maxX
+        && r.minY > screen.minY - 60 && r.minY <= screen.minY + 2 {
+        statusBottom = max(statusBottom, r.maxY - screen.minY)
+      }
+      if statusBottom >= 0 { menuBarHeight = statusBottom }
+
+      let dock = estimateDockRect(frame: info.frame, visible: info.visible)
+      let geometry: [String: AnyHashable] = [
+        "screenW": info.frame.width,
+        "screenH": info.frame.height,
+        "menuBarH": menuBarHeight,
+        "menuBarThickness": NSStatusBar.system.thickness,
+        "dock": dock.map { [$0.minX, $0.minY, $0.width, $0.height] } ?? [],
+        "windows": flat,
+      ]
+      if geometry == info.overlay.lastGeometry { continue }
+      info.overlay.lastGeometry = geometry
+      let overlay = info.overlay
+      DispatchQueue.main.async { overlay.send("geometry", geometry) }
+    }
   }
 
-  /// The Dock's frame is not public API. Its height is known from the
-  /// screen's visible frame; its width is estimated from the Dock's
-  /// preferences and the running apps. Bottom-docked, non-hidden Dock only.
+  /// The Dock's frame is not public API. Its height comes from the screen's
+  /// visible frame (only the screen showing the Dock has an inset); its
+  /// width is estimated from the Dock's preferences and running apps.
+  /// Bottom-docked, non-hidden Dock only. Result is in screen-local,
+  /// top-left coordinates.
   private func estimateDockRect(frame: CGRect, visible: CGRect) -> CGRect? {
     let height = visible.minY - frame.minY
     guard height > 4 else { return nil }
     let now = CFAbsoluteTimeGetCurrent()
     let key = "\(frame)|\(visible)"
-    if let c = dockCache, c.key == key, now - c.time < 5 { return c.rect }
+    if let c = dockCache[key], now - c.time < 5 { return c.rect }
 
     func pref(_ k: String) -> Any? { CFPreferencesCopyAppValue(k as CFString, "com.apple.dock" as CFString) }
-    let orientation = pref("orientation") as? String ?? "bottom"
     var rect: CGRect?
-    if orientation == "bottom" {
+    if (pref("orientation") as? String ?? "bottom") == "bottom" {
       let tile = CGFloat((pref("tilesize") as? NSNumber)?.doubleValue ?? 48)
       let apps = pref("persistent-apps") as? [[String: Any]] ?? []
       let others = pref("persistent-others") as? [[String: Any]] ?? []
@@ -279,40 +412,38 @@ final class OverlayController: NSObject {
           $0.activationPolicy == .regular && !pinned.contains(($0.bundleIdentifier ?? "").lowercased())
         }.count
       }
-      let appIcons = 1 + apps.count + recents.count + runningExtra  // Finder + pinned + recents + running
+      let appIcons = 1 + apps.count + recents.count + runningExtra
       let rightIcons = others.count + 1  // folders/stacks + Trash
       let separators = CGFloat(1 + ((showRecents && !recents.isEmpty) || runningExtra > 0 ? 1 : 0))
-      let slot = tile * 1.0 + 4
-      let width = CGFloat(appIcons + rightIcons) * slot + separators * 13 + (height - tile)
+      let width = CGFloat(appIcons + rightIcons) * (tile + 4) + separators * 13 + (height - tile)
       // An overfull Dock shrinks its icons to fit, keeping ~36 pt margins.
       let w = min(width, frame.width - 72)
-      // Top-left origin, points.
       rect = CGRect(x: (frame.width - w) / 2, y: frame.height - height, width: w, height: height)
     }
-    dockCache = (key, rect, now)
+    dockCache[key] = (rect, now)
     return rect
   }
 
-  // MARK: Visibility
+  // MARK: Notifications
 
   private func observe() {
     let nc = NotificationCenter.default
     let ws = NSWorkspace.shared.notificationCenter
 
     observers.append(nc.addObserver(
-      forName: NSWindow.didChangeOcclusionStateNotification, object: window, queue: .main
-    ) { [weak self] _ in
-      guard let self = self, let window = self.window else { return }
-      self.occluded = !window.occlusionState.contains(.visible)
-      self.publishVisibility(reason: "occlusion")
+      forName: NSWindow.didChangeOcclusionStateNotification, object: nil, queue: .main
+    ) { [weak self] note in
+      guard let self = self,
+            let overlay = self.overlays.first(where: { $0.panel === note.object as AnyObject }) else { return }
+      overlay.occluded = !overlay.panel.occlusionState.contains(.visible)
+      self.publishVisibility(overlay, reason: "occlusion")
     })
 
     observers.append(nc.addObserver(
       forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
     ) { [weak self] _ in
-      self?.fitToScreen()
-      self?.dockCache = nil
-      self?.send("displaysChanged", nil)
+      self?.syncScreens()
+      self?.broadcast("displaysChanged", nil)
     })
 
     for (name, asleep) in [
@@ -322,20 +453,21 @@ final class OverlayController: NSObject {
       (NSWorkspace.didWakeNotification, false),
     ] {
       observers.append(ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-        self?.screensAsleep = asleep
-        self?.publishVisibility(reason: asleep ? "sleep" : "wake")
+        guard let self = self else { return }
+        self.screensAsleep = asleep
+        self.overlays.forEach { self.publishVisibility($0, reason: asleep ? "sleep" : "wake") }
       })
     }
     // App launches/quits change the Dock width.
     for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
       observers.append(ws.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-        self?.geometryQueue.async { self?.dockCache = nil }
+        self?.geometryQueue.async { self?.dockCache.removeAll() }
       })
     }
   }
 
-  private func publishVisibility(reason: String) {
-    send("visibility", ["visible": !occluded && !screensAsleep, "reason": reason])
+  private func publishVisibility(_ overlay: ScreenOverlay, reason: String) {
+    overlay.send("visibility", ["visible": !overlay.occluded && !screensAsleep, "reason": reason])
   }
 
   // MARK: Menu
@@ -362,7 +494,7 @@ final class OverlayController: NSObject {
     menu.addItem(stats)
     menu.addItem(.separator())
     menu.addItem(NSMenuItem(title: "Quit Winter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-    statusItem.menu = menu
+    statusItem?.menu = menu
   }
 
   private func item(_ title: String, _ action: String, key: String = "") -> NSMenuItem {
@@ -384,8 +516,9 @@ final class OverlayController: NSObject {
     return parent
   }
 
+  /// Menu actions go to every screen so all overlays stay in the same state.
   @objc private func menuAction(_ sender: NSMenuItem) {
     guard let action = sender.representedObject as? String else { return }
-    send("menuAction", action)
+    broadcast("menuAction", action)
   }
 }

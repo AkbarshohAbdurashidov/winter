@@ -10,6 +10,9 @@ abstract final class DebrisKind {
   static const iceShard = 1;
   static const water = 2;
   static const iceDust = 3;
+
+  /// Coal eyes / buttons knocked off a snowman.
+  static const coal = 4;
 }
 
 /// Something the debris can hit. Returns the surface y at [x] if a particle
@@ -161,6 +164,7 @@ class DebrisSystem {
 
       if (_resting[i] == 0) {
         final drag = kind == DebrisKind.iceDust ? 2.5 : 0.3;
+        final solid = kind == DebrisKind.iceShard || kind == DebrisKind.coal;
         _vx[i] -= _vx[i] * drag * dt;
         _vy[i] += (kind == DebrisKind.iceDust ? gravity * 0.25 : gravity) * dt;
         final prevY = _y[i];
@@ -184,9 +188,9 @@ class DebrisSystem {
               case DebrisKind.iceDust:
                 _remove(i);
                 continue;
-              default: // ice shard: bounce, then come to rest
+              default: // ice shards and coal: bounce, then come to rest
                 y = hit;
-                if (_bounces[i] < 2 && _vy[i] > 120) {
+                if (solid && _bounces[i] < 2 && _vy[i] > 120) {
                   _bounces[i]++;
                   _vy[i] = -_vy[i] * 0.32;
                   _vx[i] *= 0.6;
@@ -211,12 +215,14 @@ class DebrisSystem {
       final base = switch (kind) {
         DebrisKind.snowClump => 0.95,
         DebrisKind.iceShard => 0.9,
+        DebrisKind.coal => 1.0,
         DebrisKind.water => 0.8,
         _ => 0.6,
       };
       final rgb = switch (kind) {
         DebrisKind.snowClump => 0xF4F8FF,
         DebrisKind.iceShard => 0xFFFFFF,
+        DebrisKind.coal => 0x24242C,
         DebrisKind.water => 0xFFFFFF,
         _ => 0xE2F1FF,
       };

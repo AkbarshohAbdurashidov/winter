@@ -66,6 +66,7 @@ class WinterWorld implements FlakeCollider {
   final IcicleSystem icicles = IcicleSystem();
   final List<SnowBall> balls = [];
   final List<Snowman> snowmen = [];
+  final List<FallingProp> props = [];
 
   final Map<Object, Surface> _surfaces = {};
   final Map<int, _TrackedWindow> _windows = {};
@@ -227,7 +228,7 @@ class WinterWorld implements FlakeCollider {
   }
 
   double? _probe(double x, double prevY, double y, int kind) {
-    final anySurface = kind == DebrisKind.snowClump || kind == DebrisKind.water;
+    final anySurface = kind == DebrisKind.snowClump || kind == DebrisKind.water || kind == DebrisKind.coal;
     double? best;
     for (final s in active) {
       if (!anySurface && s.kind == SurfaceKind.window) continue;
@@ -272,7 +273,8 @@ class WinterWorld implements FlakeCollider {
     }
 
     _stepBalls(dt);
-    icicles.step(dt, debris, groundAt);
+    icicles.step(dt, debris, groundAt, obstacle: _icicleObstacle, onImpact: _icicleImpact);
+    _stepProps(dt);
     debris.step(dt, screen.height, _probe, _snowLanded);
   }
 
@@ -322,6 +324,12 @@ class WinterWorld implements FlakeCollider {
       );
     }
     pile.clear();
+    for (final m in [...snowmen]) {
+      final sup = m.base.support;
+      if (sup is SurfaceSupport && sup.key == t.id) {
+        dissolveSnowman(m, push: Offset(v.dx * 0.25, -120));
+      }
+    }
     for (final b in balls) {
       final sup = b.support;
       if (sup is SurfaceSupport && sup.key == t.id) {
@@ -340,6 +348,7 @@ class WinterWorld implements FlakeCollider {
     }
     balls.clear();
     snowmen.clear();
+    props.clear();
     debris.clear();
     icicles.falling.clear();
   }
@@ -367,7 +376,8 @@ class WinterWorld implements FlakeCollider {
           }
         } else if (sup is BallSupport && pass > 0) {
           final below = sup.ball;
-          if (!balls.contains(below) || below.state == BallState.falling) {
+          final sameSnowman = b.snowman != null && identical(b.snowman, below.snowman);
+          if (!balls.contains(below) || (below.state == BallState.falling && !sameSnowman)) {
             b
               ..state = BallState.falling
               ..support = null;
@@ -382,6 +392,7 @@ class WinterWorld implements FlakeCollider {
     }
 
     for (final b in balls) {
+      if (b.noStack > 0) b.noStack -= dt;
       if (b.state != BallState.falling) continue;
       b.vy += DebrisSystem.gravity * dt;
       b.vx -= b.vx * 1.5 * dt;
@@ -398,6 +409,156 @@ class WinterWorld implements FlakeCollider {
     for (final m in snowmen) {
       m.age += dt;
     }
+    // A snowman whose balls came apart is no longer a snowman: its balls
+    // become free again so it can be rebuilt.
+    for (final m in [...snowmen]) {
+      if (!_intact(m)) dissolveSnowman(m);
+    }
+  }
+
+  bool _intact(Snowman m) {
+    for (var i = 0; i < 3; i++) {
+      if (!balls.contains(m.balls[i])) return false;
+    }
+    final body = m.body.support, head = m.head.support;
+    return body is BallSupport && identical(body.ball, m.base) &&
+        head is BallSupport && identical(head.ball, m.body);
+  }
+
+  /// Breaks a snowman apart: its accessories fall off, its balls become
+  /// ordinary snowballs again. [push] is applied to the head (e.g. a hit).
+  void dissolveSnowman(Snowman m, {Offset push = Offset.zero}) {
+    if (!snowmen.remove(m)) return;
+    final h = m.head, b = m.body;
+    final hr = h.radius;
+    if (m.age > 1.0) {
+      FallingProp prop(PropKind k, double x, double y, double vx, double vy) => FallingProp(
+            kind: k,
+            x: x,
+            y: y,
+            vx: vx + push.dx * 0.6 + _rng.range(-60, 60),
+            vy: vy + math.min(0, push.dy) * 0.5 - _rng.range(40, 160),
+            spin: _rng.range(-6, 6),
+            size: hr,
+            facing: m.facing,
+          );
+      props
+        ..add(prop(PropKind.hat, h.x, h.y - hr * 1.1, 0, -120))
+        ..add(prop(PropKind.nose, h.x + m.facing * hr * 0.5, h.y, m.facing * 80, -60))
+        ..add(prop(PropKind.scarf, h.x, h.y + hr * 0.85, 0, -40))
+        ..add(prop(PropKind.armLeft, b.x - b.radius, b.y - b.radius * 0.2, -90, -80))
+        ..add(prop(PropKind.armRight, b.x + b.radius, b.y - b.radius * 0.2, 90, -80));
+      // Coal eyes and buttons.
+      for (var k = 0; k < 5; k++) {
+        debris.spawn(
+          kind: DebrisKind.coal,
+          x: (k < 2 ? h.x : b.x) + _rng.range(-hr * 0.4, hr * 0.4),
+          y: k < 2 ? h.y - hr * 0.2 : b.y + _rng.range(-b.radius * 0.4, b.radius * 0.4),
+          vx: _rng.range(-120, 120) + push.dx * 0.3,
+          vy: -_rng.range(60, 220),
+          size: math.max(1.6, hr * 0.12),
+          life: 7,
+          vrot: _rng.range(-8, 8),
+        );
+      }
+    }
+    for (final ball in m.balls) {
+      ball.snowman = null;
+    }
+    if (push != Offset.zero && balls.contains(h)) {
+      h
+        ..noStack = 1.5
+        ..state = BallState.falling
+        ..support = null
+        ..vx = push.dx
+        ..vy = push.dy;
+    }
+  }
+
+  void _stepProps(double dt) {
+    for (var i = props.length - 1; i >= 0; i--) {
+      final p = props[i];
+      if (p.resting) {
+        p.life -= dt;
+        if (p.life <= 0) props.removeAt(i);
+        continue;
+      }
+      p.vy += DebrisSystem.gravity * dt;
+      p.vx -= p.vx * 0.8 * dt;
+      p.angle += p.spin * dt;
+      final prevY = p.y;
+      p.x += p.vx * dt;
+      final nextY = p.y + p.vy * dt;
+      final hit = p.vy > 0 ? _probe(p.x, prevY, nextY, DebrisKind.coal) : null;
+      if (hit != null) {
+        p
+          ..y = hit - p.size * 0.15
+          ..resting = true
+          ..spin = 0;
+      } else {
+        p.y = nextY;
+        if (p.y > screen.height + 80) props.removeAt(i);
+      }
+    }
+  }
+
+  // Falling icicles hit snowballs and snowmen on their way down.
+  SnowBall? _icicleTarget;
+
+  double? _icicleObstacle(double x, double prevY, double y) {
+    double? best;
+    for (final b in balls) {
+      if (b.hidden || b.state == BallState.held) continue;
+      final dx = x - b.x;
+      if (dx.abs() >= b.radius) continue;
+      final top = b.y - math.sqrt(b.radius * b.radius - dx * dx);
+      if (prevY <= top && y >= top && (best == null || top < best)) {
+        best = top;
+        _icicleTarget = b;
+      }
+    }
+    return best;
+  }
+
+  void _icicleImpact(FallingIcicle piece, double x, double y) {
+    final b = _icicleTarget;
+    _icicleTarget = null;
+    if (b == null || !balls.contains(b)) return;
+    final energy = (piece.length / 120).clamp(0.25, 1.0);
+    final side = (b.x - x).sign == 0 ? (_rng.nextDouble() < 0.5 ? -1.0 : 1.0) : (b.x - x).sign;
+    final push = Offset(side * _rng.range(80, 220) * energy, -_rng.range(80, 200) * energy);
+
+    final m = b.snowman;
+    if (m != null) dissolveSnowman(m, push: identical(b, m.head) ? push : Offset.zero);
+
+    // Knock a chunk of snow out of the ball that was hit.
+    final lost = b.area * (0.15 + 0.4 * energy);
+    final sprays = (lost / 18).clamp(4, 40).round();
+    for (var k = 0; k < sprays; k++) {
+      final a = _rng.range(math.pi * 1.1, math.pi * 1.9);
+      _spawnClump(
+        x + math.cos(a) * b.radius * 0.3,
+        y + 2,
+        math.cos(a) * _rng.range(60, 260),
+        lost / sprays,
+        vy: math.sin(a) * _rng.range(80, 300),
+        grace: 0.15,
+      );
+    }
+    final remaining = b.area - lost;
+    if (remaining < math.pi * SnowBall.minRadius * SnowBall.minRadius) {
+      balls.remove(b); // smashed to pieces; anything on top falls
+      return;
+    }
+    b.radius = math.sqrt(remaining / math.pi);
+    if (b.support is! BallSupport || push.dy < -150) {
+      b
+        ..noStack = 1.5
+        ..state = BallState.falling
+        ..support = null
+        ..vx = push.dx * 0.6
+        ..vy = push.dy * 0.5;
+    }
   }
 
   bool _hasBallOnTop(SnowBall b) {
@@ -410,7 +571,7 @@ class WinterWorld implements FlakeCollider {
 
   void _landBall(SnowBall b, double prevY, double nextY) {
     // Stack on another ball? (A finished snowman doesn't stack.)
-    for (final o in b.snowman == null ? balls : const <SnowBall>[]) {
+    for (final o in b.snowman == null && b.noStack <= 0 ? balls : const <SnowBall>[]) {
       if (identical(o, b) || o.state != BallState.resting || o.hidden) continue;
       if (o.snowman != null || _hasBallOnTop(o)) continue;
       if ((b.x - o.x).abs() > (o.radius + b.radius) * 0.55) continue;
@@ -484,7 +645,10 @@ class WinterWorld implements FlakeCollider {
     for (var i = balls.length - 1; i >= 0; i--) {
       final b = balls[i];
       if (b.hidden || !b.contains(p)) continue;
-      // Grabbing any part of a snowman moves the whole snowman.
+      // Grabbing the head pulls it off (to rebuild); grabbing the body or
+      // base moves the whole snowman.
+      final m = b.snowman;
+      if (m != null && identical(b, m.head)) dissolveSnowman(m);
       final target = b.snowman?.base ?? b;
       target
         ..state = BallState.held

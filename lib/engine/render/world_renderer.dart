@@ -99,6 +99,9 @@ class WorldRenderer {
   void paint(Canvas canvas, WinterWorld world) {
     _paintPiles(canvas, world);
     _paintBalls(canvas, world);
+    for (final p in world.props) {
+      _paintProp(canvas, p);
+    }
     _paintIcicles(canvas, world.icicles, world.time);
     final d = world.debris;
     if (d.count > 0) {
@@ -350,6 +353,57 @@ class WorldRenderer {
       canvas.drawRect(Rect.fromLTWH(-hr * 0.45, -hr * 0.95, hr * 0.12, hr * 0.62), _fill);
       canvas.restore();
     }
+  }
+
+  void _paintProp(Canvas canvas, FallingProp p) {
+    final hr = p.size;
+    final o = p.opacity;
+    canvas.save();
+    canvas.translate(p.x, p.y);
+    canvas.rotate(p.angle);
+    switch (p.kind) {
+      case PropKind.hat:
+        _fill.color = Color.fromRGBO(27, 27, 34, o);
+        canvas.drawRRect(
+            RRect.fromRectAndRadius(Rect.fromCenter(center: Offset.zero, width: hr * 1.7, height: hr * 0.16),
+                Radius.circular(hr * 0.08)),
+            _fill);
+        canvas.drawRect(Rect.fromLTWH(-hr * 0.55, -hr * 1.0, hr * 1.1, hr * 0.95), _fill);
+        _fill.color = Color.fromRGBO(179, 32, 42, o);
+        canvas.drawRect(Rect.fromLTWH(-hr * 0.55, -hr * 0.3, hr * 1.1, hr * 0.18), _fill);
+      case PropKind.nose:
+        final nose = Path()
+          ..moveTo(0, -hr * 0.12)
+          ..lineTo(p.facing * hr * 0.95, 0)
+          ..lineTo(0, hr * 0.12)
+          ..close();
+        _fill.color = Color.fromRGBO(236, 116, 30, o);
+        canvas.drawPath(nose, _fill);
+      case PropKind.scarf:
+        _fill.color = Color.fromRGBO(198, 43, 43, o);
+        canvas.drawRRect(
+            RRect.fromRectAndRadius(Rect.fromCenter(center: Offset.zero, width: hr * 1.7, height: hr * 0.38),
+                Radius.circular(hr * 0.18)),
+            _fill);
+        _stroke
+          ..color = Color.fromRGBO(242, 230, 208, o)
+          ..strokeWidth = math.max(1, hr * 0.06);
+        for (var i = -2; i <= 2; i++) {
+          canvas.drawLine(Offset(i * hr * 0.3, -hr * 0.15), Offset(i * hr * 0.3, hr * 0.15), _stroke);
+        }
+      case PropKind.armLeft:
+      case PropKind.armRight:
+        final side = p.kind == PropKind.armLeft ? -1.0 : 1.0;
+        final len = hr * 1.7;
+        _stroke
+          ..color = Color.fromRGBO(91, 58, 34, o)
+          ..strokeWidth = math.max(1.6, hr * 0.12)
+          ..strokeCap = StrokeCap.round;
+        canvas.drawLine(Offset.zero, Offset(side * len, 0), _stroke);
+        canvas.drawLine(Offset(side * len * 0.6, 0), Offset(side * len * 0.8, -len * 0.22), _stroke);
+        canvas.drawLine(Offset(side * len * 0.75, 0), Offset(side * len * 0.95, len * 0.15), _stroke);
+    }
+    canvas.restore();
   }
 
   // ----------------------------------------------------------------- icicles
