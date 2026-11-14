@@ -84,7 +84,7 @@ Tests: 16 passing (pile physics, occlusion, snowball growth, snowman formation, 
 
 Limitations:
 - The Dock's width is an estimate (macOS doesn't expose it); left/right Docks get no Dock snow.
-- Primary screen only.
+- Primary screen only (multi-monitor added later the same day, see below).
 - Windows: none of this desktop integration exists on Windows yet (needs EnumWindows tracking,
   taskbar instead of Dock, hit-region click-through). The Dart side is platform-neutral.
 - Snowmen and piles aren't saved between launches.
@@ -110,3 +110,20 @@ Not verifiable in CI: what the overlay *looks like*. GDI screen capture and Prin
 Flutter's DirectComposition output on the GPU-less runner, so per-pixel transparency, icicle/snow
 appearance and mouse interaction (rolling snowballs, breaking icicles) on Windows still need a test on
 a real Windows 10/11 PC. Run with `Winter.exe --diagnostics status.json` to get a status file.
+
+## Snowman damage & multiple displays (2026-11-14)
+
+- A snowman is dissolved (back to loose balls, hat/nose/arms/scarf fall off) when its balls are
+  pulled apart, when the window it stands on is shaken, or when a falling icicle hits it. The loose
+  balls can be stacked again into a new snowman. Falling icicles also knock or smash single
+  snowballs. Covered by `test/engine/world_test.dart` ('snowman damage and rebuilding').
+- **Multiple displays** are detected automatically and each gets its own overlay with its own
+  Flutter engine (`--screen <n>` entrypoint argument; diagnostics of extra screens go to
+  `<path>.screen<n>`). Displays added, removed or rearranged at runtime are re-synced.
+  - macOS: one `NSPanel` per `NSScreen`, shared status menu (actions go to every screen), one
+    CGWindowList query per tick split per screen, each screen's own menu bar and Dock (only the
+    screen showing the Dock has a visible-frame inset).
+  - Windows: one overlay per monitor (primary first; tray icon on the primary), per-monitor DPI,
+    each monitor's own taskbar (`Shell_TrayWnd` / `Shell_SecondaryTrayWnd`).
+  - Verified on a single display only (macOS laptop, CI VM). Behaviour with 2–3 physical
+    displays is **not yet tested**.
