@@ -31,6 +31,7 @@ import {
 import {
   announceNewUser, announceRequest, botConfigured, decideRequest, syncRevokedGrant, tg,
   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, TELEGRAM_WEBHOOK_SECRET, webhookSecret, type Decision,
+  APP_ID, telegramRoute,
 } from "./telegram";
 
 setGlobalOptions({ region: "europe-west1", maxInstances: 10 });
@@ -493,14 +494,25 @@ export const telegramWebhook = onRequest(
       const q = u.callback_query;
       if (q) {
         const chat = String(q.message?.chat?.id ?? "");
-        const m = /^req:([A-Za-z0-9]{1,64}):(approve|reject|revoke)$/.exec(q.data ?? "");
-        if (!m || chat !== TELEGRAM_CHAT_ID.value()) {
+        // `<appId>:<requestId>:<action>`; "req" is the pre-multi-app format.
+        const m = /^([a-z0-9_-]{1,16}):([A-Za-z0-9]{1,40}):(approve|reject|revoke)$/.exec(q.data ?? "");
+        const app = m?.[1];
+        const route = m && app !== "req" && app !== APP_ID.value() ? telegramRoute(app!) : null;
+        if (route) {
+          // Another app's button: that app answers the press and edits its message.
+          const fwd = await fetch(route, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": secret },
+            body: JSON.stringify(u),
+          }).catch((e) => { console.error("telegram route", app, e); return null; });
+          if (!fwd?.ok) await tg("answerCallbackQuery", { callback_query_id: q.id, text: "Dastur javob bermadi" });
+        } else if (!m || chat !== TELEGRAM_CHAT_ID.value() || (app !== "req" && app !== APP_ID.value())) {
           await tg("answerCallbackQuery", { callback_query_id: q.id, text: "Ruxsat yo'q" });
         } else {
           const actor = q.from?.username ? `telegram:@${q.from.username}` : `telegram:${q.from?.id ?? "?"}`;
           let text: string;
           try {
-            const r = await decideRequest(m[1], m[2] as Decision, actor);
+            const r = await decideRequest(m[2], m[3] as Decision, actor);
             text = !r.changed ? "Holat allaqachon o'zgargan"
               : r.status === "approved" ? "✅ Pro berildi"
                 : r.status === "rejected" ? "❌ Rad etildi" : "🚫 Pro bekor qilindi";

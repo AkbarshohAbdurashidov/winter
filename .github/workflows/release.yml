@@ -125,7 +125,7 @@ jobs:
       - name: End-to-end test (Firebase emulators)
         run: |
           printf 'TELEGRAM_BOT_TOKEN=test-token\nTELEGRAM_WEBHOOK_SECRET=local-telegram-secret\n' > firebase/functions/.secret.local
-          printf 'PORTAL_URL=http://localhost:5173\nTELEGRAM_API=http://127.0.0.1:8765\nTELEGRAM_CHAT_ID=1000\nADMIN_EMAILS=boot-admin@example.com\n' > firebase/functions/.env.local
+          printf 'PORTAL_URL=http://localhost:5173\nTELEGRAM_API=http://127.0.0.1:8765\nTELEGRAM_CHAT_ID=1000\nADMIN_EMAILS=boot-admin@example.com\nTELEGRAM_ROUTES=other=http://127.0.0.1:8765/route/other\n' > firebase/functions/.env.local
           npx -y firebase-tools@15.36.0 emulators:exec --only auth,firestore,functions --project demo-winter "python3 firebase/tests/e2e.py"
       - name: Build web portal
         working-directory: portal

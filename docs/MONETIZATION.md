@@ -75,6 +75,11 @@ the admin Telegram chat. Mention this in your privacy policy.
    buttons need it.
 4. Only presses from `TELEGRAM_CHAT_ID` are accepted. Anyone in that chat can approve, and the
    panel shows who did (`telegram:@username`).
+5. **Several apps, one bot.** Messages say `❄️ Winter uchun Pro so'rov #winter`. Buttons carry
+   `winter:<id>:<action>`. Telegram has one webhook per bot, so Winter receives every press and
+   forwards other apps' presses (`<appId>:…`) to the URLs in `TELEGRAM_ROUTES`
+   (`appId=https://…/telegramWebhook`, in `.env.<project>`), with the same webhook secret.
+   Settings: `APP_ID`, `APP_NAME`. To add another app, see [PRO_SYSTEM_PROMPT.md](PRO_SYSTEM_PROMPT.md).
 
 ## 3. App builds
 
@@ -90,7 +95,7 @@ variables → Actions → Variables). The CI installers then include accounts.
 
 ```sh
 npx firebase-tools@15 emulators:start --only auth,firestore,functions --project demo-winter
-python3 firebase/tests/e2e.py      # 69 checks, with a fake Telegram API on 127.0.0.1:8765
+python3 firebase/tests/e2e.py      # 72 checks, with a fake Telegram API on 127.0.0.1:8765
 cd portal && npm run dev           # .env.local with VITE_USE_EMULATORS=true (see .env.example)
 flutter run -d macos --dart-define=WINTER_API_URL=http://127.0.0.1:5001/demo-winter/europe-west1/app
 ```

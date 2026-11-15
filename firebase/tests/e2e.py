@@ -6,7 +6,8 @@
 
 Starts a fake Telegram Bot API on 127.0.0.1:8765 and expects the functions to
 use it (firebase/functions/.env.local: TELEGRAM_API=http://127.0.0.1:8765,
-TELEGRAM_CHAT_ID=1000; .secret.local: TELEGRAM_BOT_TOKEN=<anything>,
+TELEGRAM_CHAT_ID=1000,
+TELEGRAM_ROUTES=other=http://127.0.0.1:8765/route/other; .secret.local: TELEGRAM_BOT_TOKEN=<anything>,
 TELEGRAM_WEBHOOK_SECRET=local-telegram-secret).
 """
 import datetime
@@ -58,6 +59,8 @@ class FakeTelegram(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
         method = self.path.rsplit("/", 1)[-1]
         FakeTelegram.calls.append((method, body))
+        if self.path.startswith("/route/"):  # another app's webhook (TELEGRAM_ROUTES)
+            FakeTelegram.calls.append(("secret:" + method, self.headers.get("X-Telegram-Bot-Api-Secret-Token")))
         if method == "sendMessage":
             FakeTelegram.next_id[0] += 1
             result = {"message_id": FakeTelegram.next_id[0], "chat": {"id": int(body["chat_id"])}, "text": body["text"]}
@@ -261,7 +264,8 @@ if __name__ == "__main__":
     c, r = app("/pro/request", {"name": "Ali Valiyev"}, jwt)
     check("one pending request at a time", c == 409 and r["error"] == "pending", r)
     msgs = tg_calls("sendMessage")[sent_before:]
-    check("bot got the request", len(msgs) == 1 and "Pro so'rov" in msgs[0]["text"] and user_email in msgs[0]["text"]
+    check("bot got the request", len(msgs) == 1 and "Winter uchun Pro so'rov" in msgs[0]["text"]
+          and "#winter" in msgs[0]["text"] and msgs[0]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == f"winter:{rid}:approve" and user_email in msgs[0]["text"]
           and "@ali_v" in msgs[0]["text"] and buttons(msgs[0]["reply_markup"]) == ["approve", "reject"], msgs)
     doc = request_doc(rid)
     msg_id = int(doc["telegramMessageId"])
@@ -271,11 +275,11 @@ if __name__ == "__main__":
     c, r = app("/account", {}, jwt)
     check("account shows pending request", c == 200 and r["request"]["status"] == "pending" and not r["pro"], r)
 
-    c, r = bot_press(msg_id, f"req:{rid}:approve", secret="wrong")
+    c, r = bot_press(msg_id, f"winter:{rid}:approve", secret="wrong")
     check("webhook rejects a bad secret", c == 401, r)
-    c, r = bot_press(msg_id, f"req:{rid}:approve", chat=999)
+    c, r = bot_press(msg_id, f"winter:{rid}:approve", chat=999)
     check("presses from another chat are ignored", c == 200 and request_doc(rid)["status"] == "pending", r)
-    c, r = bot_press(msg_id, f"req:{rid}:approve")
+    c, r = bot_press(msg_id, f"winter:{rid}:approve")
     check("approve in Telegram", c == 200 and request_doc(rid)["status"] == "approved"
           and request_doc(rid)["decidedBy"] == "telegram:@boss", request_doc(rid))
     c, r = app("/status", {"token": token})
@@ -285,7 +289,7 @@ if __name__ == "__main__":
     answers = tg_calls("answerCallbackQuery")
     check("button press answered", answers and "Pro berildi" in answers[-1]["text"], answers)
     c, r = bot_press(msg_id, f"req:{rid}:reject")
-    check("stale button is a no-op", request_doc(rid)["status"] == "approved"
+    check("old-format (req:) stale button is a no-op", request_doc(rid)["status"] == "approved"
           and "allaqachon" in tg_calls("answerCallbackQuery")[-1]["text"], tg_calls("answerCallbackQuery")[-1])
     c, r = app("/pro/request", {"name": "Ali Valiyev"}, jwt)
     check("no new request while Pro", c == 409 and r["error"] == "already-pro", r)
@@ -379,6 +383,13 @@ if __name__ == "__main__":
     c, r = req("POST", f"{FN}/telegramWebhook", {"update_id": 2, "message": {"chat": {"id": 42}, "text": "/id"}},
                {"X-Telegram-Bot-Api-Secret-Token": TG_SECRET})
     check("/id replies with the chat id", c == 200 and "42" in tg_calls("sendMessage")[-1]["text"], tg_calls("sendMessage")[-1])
+    c, r = bot_press(555, "other:abc123:approve")
+    fwd = tg_calls("other")
+    check("another app's button is forwarded to its webhook with the secret", c == 200 and fwd
+          and fwd[-1]["callback_query"]["data"] == "other:abc123:approve" and tg_calls("secret:other")[-1] == TG_SECRET, fwd)
+    c, r = bot_press(556, "nope:abc123:approve")
+    check("unknown app's button is refused", c == 200 and "Ruxsat" in tg_calls("answerCallbackQuery")[-1]["text"],
+          tg_calls("answerCallbackQuery")[-1])
     c, r = run_query("installs", ajwt)
     check("admin can list installs", c == 200 and len(r) >= 1, r)
 

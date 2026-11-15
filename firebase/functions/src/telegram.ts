@@ -9,6 +9,22 @@ export const TELEGRAM_BOT_TOKEN = defineSecret("TELEGRAM_BOT_TOKEN");
 export const TELEGRAM_WEBHOOK_SECRET = defineSecret("TELEGRAM_WEBHOOK_SECRET");
 export const TELEGRAM_CHAT_ID = defineString("TELEGRAM_CHAT_ID", { default: "" });
 export const TELEGRAM_API = defineString("TELEGRAM_API", { default: "https://api.telegram.org" });
+/// One bot can serve several apps. Each app tags its messages with APP_NAME and
+/// its buttons with APP_ID (`<appId>:<requestId>:<action>`). Telegram sends
+/// every button press to the single registered webhook (this one); presses for
+/// another app are forwarded to that app's webhook listed in TELEGRAM_ROUTES
+/// (`appId=https://…/telegramWebhook,other=https://…`), with the same secret.
+export const APP_ID = defineString("APP_ID", { default: "winter" });
+export const APP_NAME = defineString("APP_NAME", { default: "Winter" });
+export const TELEGRAM_ROUTES = defineString("TELEGRAM_ROUTES", { default: "" });
+
+export function telegramRoute(app: string): string | null {
+  for (const part of TELEGRAM_ROUTES.value().split(",")) {
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i).trim() === app) return part.slice(i + 1).trim() || null;
+  }
+  return null;
+}
 
 const secret = (p: { value(): string }) => {
   try {
@@ -59,7 +75,8 @@ const STATUS_LINE: Record<RequestStatus, string> = {
 function requestText(id: string, r: FirebaseFirestore.DocumentData) {
   const tgUser = r.telegram ? `@${esc(String(r.telegram).replace(/^@/, ""))}` : "—";
   const lines = [
-    "❄️ <b>Pro so'rov</b>",
+    `❄️ <b>${esc(APP_NAME.value())} uchun Pro so'rov</b>`,
+    `#${esc(APP_ID.value())}`,
     "",
     `👤 <b>Ism:</b> ${esc(r.name)}`,
     `📧 <b>Email:</b> ${esc(r.email)}`,
@@ -77,7 +94,7 @@ function requestText(id: string, r: FirebaseFirestore.DocumentData) {
 }
 
 function requestButtons(id: string, status: RequestStatus) {
-  const b = (text: string, action: Decision) => ({ text, callback_data: `req:${id}:${action}` });
+  const b = (text: string, action: Decision) => ({ text, callback_data: `${APP_ID.value()}:${id}:${action}` });
   const row = status === "pending" ? [b("✅ Tasdiqlash", "approve"), b("❌ Rad etish", "reject")]
     : status === "approved" ? [b("🚫 Pro'ni bekor qilish", "revoke")]
       : [b("✅ Tasdiqlash", "approve")];
@@ -170,7 +187,7 @@ export async function announceNewUser(email: string, name: string | null) {
   if (!botConfigured()) return;
   await tg("sendMessage", {
     chat_id: TELEGRAM_CHAT_ID.value(),
-    text: `👋 <b>Yangi foydalanuvchi</b>\n${name ? `${esc(name)}\n` : ""}📧 ${esc(email)}`,
+    text: `👋 <b>${esc(APP_NAME.value())}</b> · Yangi foydalanuvchi\n#${esc(APP_ID.value())}\n${name ? `${esc(name)}\n` : ""}📧 ${esc(email)}`,
     parse_mode: "HTML",
   });
 }
