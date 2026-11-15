@@ -79,7 +79,7 @@ the admin Telegram chat. Mention this in your privacy policy.
    `winter:<id>:<action>`. Telegram has one webhook per bot, so Winter receives every press and
    forwards other apps' presses (`<appId>:…`) to the URLs in `TELEGRAM_ROUTES`
    (`appId=https://…/telegramWebhook`, in `.env.<project>`), with the same webhook secret.
-   Settings: `APP_ID`, `APP_NAME`. To add another app, see [PRO_SYSTEM_PROMPT.md](PRO_SYSTEM_PROMPT.md).
+   Settings: `APP_ID`, `APP_NAME`. Another app with its own bot: see [PRO_SYSTEM_PROMPT.md](PRO_SYSTEM_PROMPT.md).
 
 ## 3. App builds
 

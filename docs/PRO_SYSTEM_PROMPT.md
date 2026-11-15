@@ -8,21 +8,15 @@
 > 2. "PROMPT" bo'limini to'liq nusxalab, yangi dastur loyihasida AI agentga bering.
 > 3. Oxiridagi "Ishga tushirish" ro'yxatini bajaring.
 >
-> **Bitta bot, bir nechta dastur.** Ikkala dastur ham bitta bot (@winter_admin_bot) va bitta
-> chatdan foydalanadi. Har bir xabar qaysi dasturdan kelganini ko'rsatadi:
-> `❄️ Winter uchun Pro so'rov #winter` va `🎵 {{APP_NAME}} uchun Pro so'rov #{{APP_ID}}`.
->
-> Telegram bitta botga faqat **bitta** webhook beradi, shuning uchun hamma tugma bosishlar
-> avval Winter'ga keladi. Winter tugmadagi prefiksdan (`{{APP_ID}}:...`) qaysi dastur
-> ekanini aniqlaydi va bosishni o'sha dasturning webhook'iga uzatadi.
->
-> Bu ishlashi uchun Winter'ning `TELEGRAM_ROUTES` sozlamasiga yangi dastur qo'shiladi.
-> Yangi dastur esa webhook'ni o'zi hech qachon o'rnatmaydi.
+> **Har bir dasturning o'z boti bor.** Yangi dastur o'z bot tokeni va o'z webhook'i bilan
+> ishlaydi, Winter'ga bog'liq emas. Xabarlar baribir dastur nomini ko'rsatadi:
+> `🎵 {{APP_NAME}} uchun Pro so'rov #{{APP_ID}}`. Bir chatda bir nechta bot bo'lsa ham
+> chalkashmaydi.
 
 | O'zgaruvchi | Ma'nosi | Misol |
 |---|---|---|
 | `{{APP_NAME}}` | Xabarlarda va saytda ko'rinadigan nom | `Focus Timer` |
-| `{{APP_ID}}` | Qisqa id: kichik harf, raqam, `_`, `-`, 16 belgigacha. **`winter` va `req` bo'lmasin** | `focus` |
+| `{{APP_ID}}` | Qisqa id: kichik harf, raqam, `_`, `-`, 16 belgigacha.  | `focus` |
 | `{{EMOJI}}` | Bot xabaridagi belgi | `⏱️` |
 | `{{PRO_FEATURES}}` | Pro nimani ochadi | `Cheksiz sessiyalar, statistika eksporti` |
 | `{{PLATFORM}}` | Dastur turi | `Flutter desktop (macOS + Windows)` / `Android` / `web` |
@@ -48,31 +42,21 @@ URL has no account features and locks nothing.
 Write clean, small, well-named code. Validate everything on the server. Never trust the client.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. SHARED TELEGRAM BOT (most important constraint)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-This app shares one bot and one admin chat with another app ("Winter"). Telegram allows
-ONE webhook per bot, and Winter owns it. Winter forwards button presses whose callback_data
-starts with "{{APP_ID}}:" to this app's `telegramWebhook` URL. It posts the unchanged
-Telegram update JSON with the same `X-Telegram-Bot-Api-Secret-Token` header.
-
-So:
+1. TELEGRAM BOT (this app has its own bot)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 - Config (functions params; NEVER commit secrets, the repo may be public):
-  - secrets: TELEGRAM_BOT_TOKEN (same bot as Winter), TELEGRAM_WEBHOOK_SECRET (the SAME value
-    Winter uses, so forwarded presses pass the same check).
-  - strings: TELEGRAM_CHAT_ID (same chat as Winter), TELEGRAM_API (default
-    https://api.telegram.org; tests point it at a fake server), APP_ID="{{APP_ID}}",
-    APP_NAME="{{APP_NAME}}", PORTAL_URL, ADMIN_EMAILS (comma list, bootstrap admins),
-    TELEGRAM_SHARED (default "true").
-- When TELEGRAM_SHARED=true, this app must NEVER call setWebhook or setMyCommands.
-  `/admin/telegram/connect` returns 409 "shared-bot", and the admin panel's Telegram card
-  says "Shared bot: button presses arrive through Winter" instead of a Connect button.
-  getMe/getWebhookInfo may still be shown read-only.
-- If TELEGRAM_SHARED=false (own bot), implement Connect = setWebhook(url, secret_token,
-  allowed_updates ["callback_query","message"]) + setMyCommands [{id, "Chat ID"}].
-- Also implement TELEGRAM_ROUTES (format "appId=https://…/telegramWebhook,other=…"), the same
-  as Winter, so this app can become the hub later. If a callback's appId is neither this
-  APP_ID nor "req" and a route exists, POST the raw update there with the secret header and
-  do nothing else. If that fetch fails, answerCallbackQuery "Dastur javob bermadi".
+  - secrets: TELEGRAM_BOT_TOKEN (this app's bot from @BotFather), TELEGRAM_WEBHOOK_SECRET
+    (a long random string, e.g. openssl rand -hex 32).
+  - strings: TELEGRAM_CHAT_ID (the admin chat; the user's own id for a private chat, or a
+    negative group id), TELEGRAM_API (default https://api.telegram.org; tests point it at a
+    fake server), APP_ID="{{APP_ID}}", APP_NAME="{{APP_NAME}}", PORTAL_URL, ADMIN_EMAILS
+    (comma list, bootstrap admins).
+- Admin panel "Connect buttons" → `/admin/telegram/connect` → setWebhook(url of
+  telegramWebhook, secret_token, allowed_updates ["callback_query","message"],
+  drop_pending_updates false) + setMyCommands [{command "id", description "Chat ID"}].
+  The panel's Telegram card shows bot @username, chat id, Connected / Not connected (webhook
+  url == expected url), pending updates, last error.
+- Notifications work without the webhook; only the buttons need it.
 
 Bot message formats (HTML parse_mode, escape & < > in all user data, times in Asia/Tashkent):
 
@@ -104,11 +88,10 @@ Bot message formats (HTML parse_mode, escape & < > in all user data, times in As
 `telegramWebhook` (onRequest, secrets TOKEN + WEBHOOK_SECRET):
 - Compare the header with the secret in constant time (timingSafeEqual); otherwise 401.
 - Always answer 200 to valid calls, so Telegram never retries forever.
-- For messages "/start" or "/id", reply "Chat ID: <code>…</code>". Only the hub does this; when
-  TELEGRAM_SHARED=true, Winter already replies.
+- For messages "/start" or "/id", reply "Chat ID: <code>…</code>" (helps find the chat id).
 - Parse callback_data with /^([a-z0-9_-]{1,16}):([A-Za-z0-9]{1,40}):(approve|reject|revoke)$/.
   Accept it only if the appId is APP_ID and the chat id == TELEGRAM_CHAT_ID; otherwise answer
-  "Ruxsat yo'q".
+  "Ruxsat yo'q". Anyone in that chat may decide.
 - actor = "telegram:@username" (or "telegram:<id>").
 - Run decideRequest, then answerCallbackQuery with "✅ Pro berildi" / "❌ Rad etildi" /
   "🚫 Pro bekor qilindi" / "Holat allaqachon o'zgargan" (no-op) / "So'rov topilmadi".
@@ -199,8 +182,8 @@ Portal:
 Admin (require admin, else 401/403):
   /admin/requests/decide {id, action approve|reject|revoke} → decideRequest(id, action, adminEmail)
   /admin/telegram/status → configured, chatId, bot username, webhookUrl, expectedUrl, pending
-       updates, lastError, shared
-  /admin/telegram/connect → see section 1
+       updates, lastError
+  /admin/telegram/connect → see section 1 (412 bot-not-configured if token/chat/secret missing)
   /admin/users → rows: email, name, created, lastSeen, devices count, access, expiresAt,
        telegram, phone, request_status
   /admin/stats → installs, active (7d), users, pro, requests, pending, approved, rejected,
@@ -236,7 +219,7 @@ Pages:
     • Pro requests: a LIVE onSnapshot list (newest first) with a pending-count badge on the
       tab. Cards show name, email, t.me/<user> link, tel: link, time, a status badge, and
       buttons Approve / Reject / Remove Pro (all through /admin/requests/decide). Include
-      the Telegram card from section 1.
+      the Telegram card with "Connect buttons" from section 1.
     • Users: search plus filters All / {{APP_NAME}} Pro / Waiting / Free, and a contact column.
       A row opens a drawer with details, devices and Approve / Reject / Remove Pro.
     • Give Pro: grant Pro to any email (forever or until a date, plus a note), even before
@@ -273,9 +256,8 @@ Pages:
   - a stale press is a no-op
   - panel revoke re-renders the message; removing a grant triggers the request revoked sync
   - reject then re-request; one pending at a time; already-pro 409
-  - "winter:…" or unknown appIds are refused ("Ruxsat yo'q")
-  - routing: a TELEGRAM_ROUTES entry forwards with the secret
-  - /admin/telegram/connect returns 409 when shared
+  - callback_data with another appId is refused ("Ruxsat yo'q")
+  - /admin/telegram/connect calls setWebhook with the secret; "/id" replies with the chat id
   - admin-only endpoints return 401/403; Firestore rules (user can't read others; grant update
     limited to revokedAt/revokedBy)
   - the new-user message is sent only once
@@ -293,44 +275,24 @@ When done, run the e2e tests and the builds, and report what passed.
 
 ## Ishga tushirish (siz bajarasiz)
 
-**Yangi dastur ({{FIREBASE_PROJECT}}):**
-
 1. Firebase loyiha oching va Blaze rejasini yoqing. Auth'da Google va Email link'ni yoqing.
    Firestore'ni `europe-west1` mintaqasida yarating.
-2. Secret'larni o'rnating. Ikkalasi ham Winter'dagi bilan **bir xil** bo'lishi kerak:
+2. Yangi botning tokeni va webhook secret'ini o'rnating:
    ```sh
    npx -y firebase-tools@15 --project {{FIREBASE_PROJECT}} functions:secrets:set TELEGRAM_BOT_TOKEN
-   npx -y firebase-tools@15 --project {{FIREBASE_PROJECT}} functions:secrets:set TELEGRAM_WEBHOOK_SECRET
+   openssl rand -hex 32 | npx -y firebase-tools@15 --project {{FIREBASE_PROJECT}} functions:secrets:set TELEGRAM_WEBHOOK_SECRET --data-file=-
    ```
-   Winter'dagi webhook secret'ni ko'rish uchun shu loyihada (winter) quyidagini ishga tushiring:
-   `npx -y firebase-tools@15 --project winter-snow-app functions:secrets:access TELEGRAM_WEBHOOK_SECRET`
 3. `firebase/functions/.env.{{FIREBASE_PROJECT}}` faylini yarating (gitignored):
    ```
    APP_ID={{APP_ID}}
    APP_NAME={{APP_NAME}}
-   TELEGRAM_CHAT_ID=<Winter bilan bir xil chat id>
-   TELEGRAM_SHARED=true
+   TELEGRAM_CHAT_ID=<chat id: botga /id yozsangiz aytadi>
    PORTAL_URL=https://{{FIREBASE_PROJECT}}.web.app
    ADMIN_EMAILS=<sizning emailingiz>
    ```
-4. Deploy qiling. Chiqqan `telegramWebhook` URL'ni yozib oling:
-   `https://europe-west1-{{FIREBASE_PROJECT}}.cloudfunctions.net/telegramWebhook`
+4. Deploy qiling, admin panelga kiring va **Pro requests → Connect buttons** ni bosing.
+5. Tekshirish: Pro so'rov yuboring. Yangi botdan `{{APP_NAME}} uchun Pro so'rov` xabari
+   kelishi kerak. "✅ Tasdiqlash" bosilganda panelda holat "Tasdiqlandi" bo'lishi kerak.
 
-**Winter tomonida (bir marta):**
-
-5. `firebase/functions/.env.winter-snow-app` fayliga quyidagi qatorni qo'shing:
-   ```
-   TELEGRAM_ROUTES={{APP_ID}}=https://europe-west1-{{FIREBASE_PROJECT}}.cloudfunctions.net/telegramWebhook
-   ```
-   Uchinchi dastur qo'shilsa, vergul bilan qo'shiladi: `a=https://…,b=https://…`.
-6. Winter funksiyalarini qayta deploy qiling:
-   `npx -y firebase-tools@15 --project winter-snow-app deploy --only functions:app,functions:telegramWebhook,functions:onGrantUpdated`
-
-**Tekshirish:** yangi dasturda Pro so'rov yuboring. Botga `🎵 {{APP_NAME}} uchun Pro so'rov`
-xabari kelishi kerak. "✅ Tasdiqlash" bosilganda yangi dasturning admin panelida holat
-"Tasdiqlandi" bo'lishi kerak.
-
-> ⚠️ Yangi dastur admin panelida **"Connect buttons" bosilmasin**. Agar bosilsa, webhook
-> Winter'dan olinib qoladi va Winter tugmalari ishlamay qoladi. Prompt bu tugmani
-> `TELEGRAM_SHARED=true` bo'lganda yashiradi. Agar shunday bo'lib qolsa, Winter admin panelida
-> **Pro requests → Connect buttons** ni bosing, webhook Winter'ga qaytadi.
+> Bot tokeni hech qachon kodga yoki chatga yozilmasin. U faqat Secret Manager'da va
+> gitignored `.secret.local` faylida turadi.
