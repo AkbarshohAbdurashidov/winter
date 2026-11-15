@@ -9,14 +9,15 @@
                                          account), Telegram, phone            [✅ Tasdiqlash] [❌ Rad etish]
                                /admin   Pro requests (live), Users,        ◀─▶ same buttons, same state
                                          Give Pro, Installs, Admins
- /status every 30 min ◀────── Cloud Functions `app`, `telegramWebhook`, `onGrantUpdated` + Firestore
+ /status every 2 min* ◀────── Cloud Functions `app`, `telegramWebhook`, `onGrantUpdated` + Firestore
 ```
 
 **How Pro works.** Pro belongs to an **email**. It's on while the email has an active
 document in `grants` (forever, or until a date). A grant is created when an admin
 approves a Pro request (in the panel or the bot) or gives Pro directly in **Give Pro**
 (this works even before the person signs up). The app signs in with that email and
-sees Pro within 30 minutes, or right away with ❄ → Refresh Pro Status.
+sees Pro within 2 minutes (*a signed-in account without Pro is checked every 2 min, with Pro
+every 30 min). Picking a Pro option or ❄ → Refresh Pro Status checks right away.
 
 **Sync between the panel and the bot.** Every approve / reject / remove goes through one
 server function (`decideRequest` in `firebase/functions/src/telegram.ts`). It changes

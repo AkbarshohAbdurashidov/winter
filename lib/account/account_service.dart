@@ -191,7 +191,11 @@ class AccountService extends ChangeNotifier {
   Timer? _followTimer;
   String _storeSnapshot = '';
 
+  /// How often the owner asks the backend for the Pro status. A signed-in
+  /// account without Pro is checked often, so an approved request shows up
+  /// within a couple of minutes; with Pro (or signed out) it rarely changes.
   static const statusInterval = Duration(minutes: 30);
+  static const waitingInterval = Duration(minutes: 2);
   static const heartbeatInterval = Duration(hours: 6);
   static const linkTimeout = Duration(minutes: 15);
   Duration pollInterval = const Duration(seconds: 3);
@@ -214,7 +218,6 @@ class AccountService extends ChangeNotifier {
       }
       unawaited(heartbeat(launch: true));
       unawaited(refresh());
-      _statusTimer = Timer.periodic(statusInterval, (_) => refresh());
       _heartbeatTimer = Timer.periodic(heartbeatInterval, (_) => heartbeat());
     } else {
       _followTimer = Timer.periodic(const Duration(seconds: 10), (_) => _follow());
@@ -267,11 +270,19 @@ class AccountService extends ChangeNotifier {
     }
   }
 
+  Duration get nextCheckIn => signedIn && !isPro ? waitingInterval : statusInterval;
+
+  void _scheduleRefresh() {
+    _statusTimer?.cancel();
+    _statusTimer = Timer(nextCheckIn, refresh);
+  }
+
   /// Asks the backend for the current Pro status. Keeps the cached status
   /// when offline.
   Future<void> refresh() async {
     final api = _api;
     if (api == null || !owner) return;
+    _statusTimer?.cancel();
     try {
       final j = await api.post('/status', {if (_token != null) 'token': _token});
       final next = ProStatus.fromJson(j);
@@ -283,7 +294,25 @@ class AccountService extends ChangeNotifier {
     } catch (e) {
       _lastError = '$e';
       debugPrint('Winter: status check failed: $e');
+    } finally {
+      _scheduleRefresh();
     }
+  }
+
+  /// Checks right now whether this account has Pro (used before offering the
+  /// Pro page, so a just-approved request isn't sent there again). Other
+  /// screens wait briefly for the owner's answer in the shared store.
+  Future<bool> checkPro() async {
+    if (!enabled) return true;
+    if (owner) {
+      await refresh();
+      return isPro;
+    }
+    for (var i = 0; i < 16 && !isPro; i++) {
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      _follow();
+    }
+    return isPro;
   }
 
   /// Opens the browser to sign in; this app receives its token once the

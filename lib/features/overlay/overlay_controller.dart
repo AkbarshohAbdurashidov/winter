@@ -49,6 +49,7 @@ class OverlayController extends ChangeNotifier {
 
   bool _userPaused = const bool.fromEnvironment('WINTER_START_PAUSED');
   bool _visible = true;
+  bool _disposed = false;
   // Build-time defaults (e.g. --dart-define=WINTER_QUALITY=ultraLow) make
   // profiling individual presets reproducible. Persisted settings: Phase 6.
   bool _showStats = const bool.fromEnvironment('WINTER_STATS');
@@ -230,21 +231,28 @@ class OverlayController extends ChangeNotifier {
         setLevel(OverlayLevel.values.byName(name));
       case ['intensity', final name]:
         final value = SnowIntensity.values.byName(name);
-        if (!hasPro && proIntensities.contains(value)) return _offerPro();
+        if (!hasPro && proIntensities.contains(value)) return _offerPro(() => setIntensity(value));
         setIntensity(value);
       case ['quality', final name]:
         final value = QualityPreset.values.byName(name);
-        if (!hasPro && proQualities.contains(value)) return _offerPro();
+        if (!hasPro && proQualities.contains(value)) return _offerPro(() => setQuality(value));
         setQuality(value);
     }
   }
 
-  /// A Pro-only option was chosen without Pro: open the Pro request page (once,
-  /// from the first screen) and keep the current setting.
-  void _offerPro() {
+  /// A Pro-only option was chosen while the saved status says "no Pro".
+  /// Ask the backend first: if Pro was approved since the last check, just
+  /// apply the option. Otherwise open the Pro request page (once, from the
+  /// first screen) and keep the current setting.
+  void _offerPro(void Function() apply) {
+    _changed(); // re-sync check marks until we know
     final a = account;
-    if (a != null && a.owner) unawaited(a.upgrade());
-    _changed(); // re-sync check marks
+    if (a == null) return;
+    unawaited(a.checkPro().then((pro) {
+      if (_disposed) return;
+      if (pro) return apply();
+      if (a.owner) unawaited(a.upgrade());
+    }));
   }
 
   void _updateRunning() {
@@ -280,6 +288,7 @@ class OverlayController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     account?.removeListener(_onAccountChanged);
     _sub?.cancel();
     scheduler.dispose();

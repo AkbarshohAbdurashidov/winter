@@ -87,7 +87,7 @@ function ProActive({ expiresAt }: { expiresAt: string | null }) {
       <h2 className="text-2xl font-semibold text-white">You have Winter Pro</h2>
       <p className="mt-2 text-sm text-slate-400">
         {expiresAt ? `Active until ${formatDate(expiresAt)}.` : "Enjoy the blizzards!"} Winter on your computer updates
-        within 30 minutes, or choose “Refresh Pro Status” in its ❄ menu.
+        within 2 minutes, or right away when you pick a Pro option or choose “Refresh Pro Status” in its ❄ menu.
       </p>
       <Link to="/account" className="btn-primary mt-6">Go to account</Link>
     </div>

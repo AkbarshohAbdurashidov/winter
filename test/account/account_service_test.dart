@@ -215,6 +215,38 @@ void main() {
       s.dispose();
     });
 
+    test('a request approved since the last check applies instead of reopening the Pro page', () async {
+      final platform = FakePlatform();
+      final s = service();
+      api.approved = true;
+      await s.start();
+      await s.signIn();
+      final c = OverlayController(platform: platform, account: s);
+      await c.init();
+      expect(s.isPro, isFalse);
+      final pagesBefore = opened.length;
+      api.status = {'signedIn': true, 'email': 'a@b.c', 'pro': true, 'access': 'pro'}; // approved in the bot
+      platform.emit(const MenuActionEvent('intensity:blizzard'));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(c.intensity, SnowIntensity.blizzard);
+      expect(platform.menu!.account.pro, isTrue);
+      expect(opened.length, pagesBefore, reason: 'no Pro page when Pro is already on');
+      c.dispose();
+      s.dispose();
+    });
+
+    test('a signed-in account without Pro is re-checked every couple of minutes', () async {
+      final s = service();
+      api.approved = true;
+      await s.start();
+      await s.signIn();
+      expect(s.nextCheckIn, AccountService.waitingInterval);
+      api.status = {'signedIn': true, 'email': 'a@b.c', 'pro': true, 'access': 'pro'};
+      await s.refresh();
+      expect(s.nextCheckIn, AccountService.statusInterval);
+      s.dispose();
+    });
+
     test('without a backend nothing is gated', () async {
       final platform = FakePlatform();
       final c = OverlayController(platform: platform);
